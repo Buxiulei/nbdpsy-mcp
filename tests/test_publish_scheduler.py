@@ -10,7 +10,10 @@
 - 队列 + 锁最小契约:AccountLocks 同号同锁;PublishQueue submit→worker→runner。
 - 真实 runner 全流程:mark_publishing → per-account 锁 → to_thread(publish_once) → finish
   (monkeypatch publish_once,不起浏览器)。
-- 调度循环:start 先 recover_stale 再周期 scan→submit,两条 job 均落 published;可 stop。
+- runner 兜底:publish_once 抛异常 → 占用后统一 finish(fail),job 不卡 publishing,
+  按状态机排重试(pending + retries 递增 + error)或耗尽转 failed。
+- 调度循环:start 每 poll 周期先 recover_stale 再 scan→submit,两条 job 均落 published;可 stop。
+- 周期 recover:recover_stale 被每个 poll 周期调用(非仅启动一次)。
 """
 
 import asyncio
@@ -277,6 +280,51 @@ async def test_publish_runner_skips_when_not_pending(db_factory, monkeypatch):
     assert called["n"] == 0
 
 
+async def test_publish_runner_exception_does_not_stick(db_factory, monkeypatch):
+    """publish_once 抛异常:runner 兜底 finish,job 不卡 publishing,按状态机排重试(pending)。"""
+    account_id = await _make_account(db_factory)
+    job_id = await _make_job(db_factory, account_id)
+
+    def boom_publish_once(*args, **kwargs):
+        raise RuntimeError("浏览器炸了")
+
+    monkeypatch.setattr(scheduler_mod.sync_client, "publish_once", boom_publish_once)
+
+    scheduler = PublishScheduler(db_factory)
+    runner = make_publish_runner(db_factory, scheduler, AccountLocks())
+    await runner(job_id)
+
+    job = await _get_job(db_factory, job_id)
+    # 不卡 publishing:占用后 publish_once 抛异常被兜底 finish(fail)→ 有重试额度回 pending
+    assert job.status == "pending"
+    assert job.retries == 1  # 重试计数递增
+    assert job.next_retry_at is not None  # 排了下次重试
+    assert job.started_at is None
+    assert job.error is not None and "浏览器炸了" in job.error  # error 落库
+
+
+async def test_publish_runner_exception_exhausts_to_failed(db_factory, monkeypatch):
+    """publish_once 反复抛异常:重试耗尽后终态 failed,而非永久 publishing。"""
+    account_id = await _make_account(db_factory)
+    # 预置 retries=len(delays):再失败一次即耗尽转 failed
+    delays = settings.retry_delays
+    job_id = await _make_job(db_factory, account_id, retries=len(delays))
+
+    def boom_publish_once(*args, **kwargs):
+        raise RuntimeError("又炸了")
+
+    monkeypatch.setattr(scheduler_mod.sync_client, "publish_once", boom_publish_once)
+
+    scheduler = PublishScheduler(db_factory)
+    runner = make_publish_runner(db_factory, scheduler, AccountLocks())
+    await runner(job_id)
+
+    job = await _get_job(db_factory, job_id)
+    assert job.status == "failed"
+    assert job.started_at is None
+    assert job.error is not None and "又炸了" in job.error
+
+
 # ---------------- 调度循环:恢复 + 扫表 + 发布 ----------------
 
 
@@ -310,3 +358,29 @@ async def test_scheduler_loop_recovers_and_publishes(db_factory, monkeypatch):
 
     assert (await _get_job(db_factory, stale_id)).status == "published"
     assert (await _get_job(db_factory, pending_id)).status == "published"
+
+
+async def test_scheduler_loop_recovers_every_cycle(db_factory, monkeypatch):
+    """周期 recover:recover_stale 被每个 poll 周期调用(而非仅启动一次)。"""
+    scheduler = PublishScheduler(db_factory, poll_interval=0.02)
+
+    calls = {"n": 0}
+    orig_recover = scheduler.recover_stale
+
+    async def counting_recover():
+        calls["n"] += 1
+        return await orig_recover()
+
+    monkeypatch.setattr(scheduler, "recover_stale", counting_recover)
+
+    scheduler.start()
+    try:
+        for _ in range(300):
+            if calls["n"] >= 3:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await scheduler.stop()
+
+    # 仅启动一次调用则恒为 1;>=3 证明每轮 poll 都在跑 recover_stale
+    assert calls["n"] >= 3, "recover_stale 应被每个 poll 周期调用,而非仅启动一次"

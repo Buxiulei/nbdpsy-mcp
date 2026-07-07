@@ -9,7 +9,7 @@
 - ``mark_publishing``:``UPDATE ... WHERE status='pending'`` 原子占用,rowcount 判是否真占到,
   防"扫表 + 队列"双重处理同一 job。
 - ``finish``:成功写 note_id/url 置 published;失败排期重试或置 failed。
-- ``start``/``stop``:lifespan 循环——先 recover_stale,再周期 scan_once→submit;可停。
+- ``start``/``stop``:lifespan 循环——每个 poll 周期先 recover_stale 再 scan_once→submit;可停。
 
 时间统一用 ``datetime.utcnow()``(naive UTC),与模型 ``created_at`` 一致。
 """
@@ -57,37 +57,47 @@ def make_publish_runner(
     """
 
     async def publish_runner(job_id: int) -> None:
-        # 1. 载 job + account + cookie(会话内取尽所需字段,出会话不再触发 lazy load)
-        async with session_factory() as session:
-            job = await session.get(PublishJob, job_id)
-            if job is None:
-                return
-            account = await session.get(XhsAccount, job.account_id)
-            account_id = job.account_id
-            title = job.title
-            content = job.content
-            image_paths = json.loads(job.images_json or "[]")
-            topics = json.loads(job.topics_json or "[]")
-            cookies = _decrypt_account_cookies(account)
-
-        # 2. 原子占用:占不到(别处已处理 / 非 pending)直接退,防双重发布
+        # 1. 原子占用先行:占不到(别处已处理 / 非 pending)直接退,防双重发布
         if not await scheduler.mark_publishing(job_id):
             return
 
-        # 3. per-account 锁串行 + 线程内跑 sync 发布(禁同号并发)
-        async with account_locks.get(account_id):
-            result = await asyncio.to_thread(
-                sync_client.publish_once,
-                account_id,
-                cookies,
-                title,
-                content,
-                image_paths,
-                topics,
-            )
+        # 2. 占用成功后的整个执行(载数据 + 线程发布 + finish)统一兜底:任何一步抛异常都
+        #    显式 finish(success=False),交回重试/退避机制,绝不让 job 卡死在 publishing。
+        try:
+            # 2a. 载 job + account + cookie(会话内取尽所需字段,出会话不再触发 lazy load)
+            async with session_factory() as session:
+                job = await session.get(PublishJob, job_id)
+                if job is None:
+                    return
+                account = await session.get(XhsAccount, job.account_id)
+                account_id = job.account_id
+                title = job.title
+                content = job.content
+                image_paths = json.loads(job.images_json or "[]")
+                topics = json.loads(job.topics_json or "[]")
+                cookies = _decrypt_account_cookies(account)
 
-        # 4. 落状态机(成功→published;失败→重试排期或 failed)
-        await scheduler.finish(job_id, result)
+            # 2b. per-account 锁串行 + 线程内跑 sync 发布(禁同号并发)
+            async with account_locks.get(account_id):
+                result = await asyncio.to_thread(
+                    sync_client.publish_once,
+                    account_id,
+                    cookies,
+                    title,
+                    content,
+                    image_paths,
+                    topics,
+                )
+
+            # 2c. 落状态机(成功→published;失败→重试排期或 failed)
+            await scheduler.finish(job_id, result)
+        except Exception as exc:
+            # publish_once 内部已把可预期失败转成 PublishResult;能逃到这里的是构造/收尾/
+            # 载数据等意外异常。兜底落一个失败结果,让状态机排重试而非永久 publishing。
+            logger.exception("发布 runner 处理 job {} 异常,兜底转失败", job_id)
+            await scheduler.finish(
+                job_id, sync_client.PublishResult(success=False, error=str(exc))
+            )
 
     return publish_runner
 
@@ -211,18 +221,22 @@ class PublishScheduler:
             await session.commit()
 
     def start(self) -> None:
-        """启动 lifespan 循环:起队列 worker,后台协程先 recover_stale 再周期 scan→submit。"""
+        """启动 lifespan 循环:起队列 worker,后台协程每 poll 周期 recover_stale→scan→submit。"""
         self._stop_event = asyncio.Event()
         self._queue.start(self._publish_runner)
         self._loop_task = asyncio.create_task(self._run_loop())
 
     async def _run_loop(self) -> None:
-        """后台调度循环:启动恢复一次,随后每 poll_interval 扫一次到期 job 入队。"""
-        try:
-            await self.recover_stale()
-        except Exception:
-            logger.exception("发布调度器启动恢复失败")
+        """后台调度循环:每 poll_interval 先回收僵死 publishing(recover_stale),再扫到期 job 入队。
+
+        recover_stale 放在循环内每轮先跑(而非仅启动一次):runner 兜底失效 / 进程被信号打断
+        留下的 publishing 僵死 job 无需等下次重启,下一个 poll 周期即被复位重排。
+        """
         while not self._stop_event.is_set():
+            try:
+                await self.recover_stale()
+            except Exception:
+                logger.exception("发布调度器僵死回收失败")
             try:
                 for job_id in await self.scan_once():
                     self._queue.submit(job_id)
