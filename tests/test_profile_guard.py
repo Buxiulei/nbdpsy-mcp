@@ -26,6 +26,21 @@ def test_profile_dir_unified_path(monkeypatch, tmp_path):
     assert profile_dir(7) == tmp_path / "browser" / "account_7"
 
 
+def test_profile_dir_absolute_when_data_dir_relative(monkeypatch):
+    """DATA_DIR 相对(默认 ``./data``)时,profile_dir 仍须返回绝对路径。
+
+    否则 kill_orphans 拿相对路径去比 camoufox 绝对化后的 argv 永不匹配,
+    僵死 profile 锁清理静默失效(本模块存在的核心目的)。
+    """
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "DATA_DIR", "./data")
+    result = profile_dir(7)
+    assert result.is_absolute()
+    # 路径尾部约定不变:browser/account_7
+    assert result.parts[-2:] == ("browser", "account_7")
+
+
 def test_argv_targets_profile_prefix_safe(tmp_path):
     """account_2 的 profile 不能匹配含 account_20 的 argv(前缀陷阱)。"""
     pdir2 = tmp_path / "browser" / "account_2"
@@ -70,6 +85,11 @@ def test_sanitize_keeps_real_proxy():
     opts = {"proxy": {"server": "http://127.0.0.1:10808"}, "a": 1}
     out = sanitize_launch_options(opts)
     assert out["proxy"] == {"server": "http://127.0.0.1:10808"}
+
+
+def test_sanitize_no_proxy_key_passthrough():
+    """无 proxy 键 → 原样返回,不报错。"""
+    assert sanitize_launch_options({"a": 1}) == {"a": 1}
 
 
 def test_sanitize_does_not_mutate_input():

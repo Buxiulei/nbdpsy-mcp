@@ -31,11 +31,17 @@ _COOKIE_FILES = ("cookies.sqlite", "cookies.sqlite-wal", "cookies.sqlite-shm")
 
 
 def profile_dir(account_id: int) -> Path:
-    """返回账号的统一 profile 目录 ``DATA_DIR/browser/account_{id}``。
+    """返回账号的统一 profile 目录 ``DATA_DIR/browser/account_{id}`` 的**绝对路径**。
 
     纯路径计算,不创建目录(创建交给真正要落盘的调用方,便于测试隔离)。
+
+    必须绝对化(``.resolve()``):``DATA_DIR`` 默认是相对路径 ``./data``,而
+    camoufox/Playwright 启动时会把 ``user_data_dir`` 绝对化后拼进子进程 argv,
+    ``/proc/<pid>/cmdline`` 里存的是绝对路径。若此处返回相对路径,``kill_orphans``
+    拿它去比 argv 会永不匹配 → 僵死 profile 锁清理静默失效。``.resolve()`` 对不
+    存在的路径也安全(strict 默认 False),不创建目录,保持"谁落盘谁建"语义不变。
     """
-    return Path(settings.DATA_DIR) / "browser" / f"account_{account_id}"
+    return (Path(settings.DATA_DIR) / "browser" / f"account_{account_id}").resolve()
 
 
 def clean_locks(profile_dir: Path) -> None:
