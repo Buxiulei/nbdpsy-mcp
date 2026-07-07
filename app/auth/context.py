@@ -17,6 +17,14 @@ class AuthError(Exception):
     """未认证或认证失败:current_operator() 在无当前运营者时抛出。"""
 
 
+class AccessDenied(Exception):
+    """授权拒绝:已认证但无权执行该操作(RBAC guards 抛出,上层转 403)。
+
+    专用类而非内置 PermissionError——后者是 OSError 子类,会与文件 I/O 等真实
+    OS 权限错误语义碰撞,导致 403 处理器误吞掉真因。
+    """
+
+
 # 当前请求的运营者;默认 None 表示尚未认证。
 _current_operator: ContextVar[Operator | None] = ContextVar(
     "current_operator", default=None

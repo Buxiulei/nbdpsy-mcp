@@ -3,7 +3,7 @@
 复用 conftest 的 db fixture(每测试独立临时 sqlite,自动建表 + 清理)。造
 admin、operator、两个账号,以及一条 operator→account1 的 access 行,覆盖三个
 函数的全部分支:
-- require_admin:admin 过、operator 抛 PermissionError。
+- require_admin:admin 过、operator 抛 AccessDenied。
 - assert_account_access:admin 对任意账号放行;operator 有 access 放行、无则抛。
 - visible_account_ids:admin 返 None(全部);operator 返其 access 账号 id 列表。
 """
@@ -11,6 +11,7 @@ admin、operator、两个账号,以及一条 operator→account1 的 access 行,
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.context import AccessDenied
 from app.auth.guards import (
     assert_account_access,
     require_admin,
@@ -42,8 +43,8 @@ def test_require_admin_passes_for_admin():
 
 
 def test_require_admin_raises_for_operator():
-    """operator 调 require_admin 抛 PermissionError。"""
-    with pytest.raises(PermissionError):
+    """operator 调 require_admin 抛 AccessDenied。"""
+    with pytest.raises(AccessDenied):
         require_admin(Operator(name="o", apikey_hash="h", role="operator"))
 
 
@@ -58,10 +59,10 @@ async def test_admin_access_all(db: AsyncSession):
 
 
 async def test_operator_access_only_granted(db: AsyncSession):
-    """operator:有 access 的 account1 放行,无 access 的 account2 抛 PermissionError。"""
+    """operator:有 access 的 account1 放行,无 access 的 account2 抛 AccessDenied。"""
     _admin, operator, acc1, acc2 = await _seed(db)
     await assert_account_access(operator, acc1.id, db)
-    with pytest.raises(PermissionError):
+    with pytest.raises(AccessDenied):
         await assert_account_access(operator, acc2.id, db)
 
 
@@ -79,3 +80,17 @@ async def test_visible_operator_returns_granted_ids(db: AsyncSession):
     _admin, operator, acc1, _acc2 = await _seed(db)
     ids = await visible_account_ids(operator, db)
     assert ids == [acc1.id]
+
+
+async def test_visible_operator_zero_access_returns_empty_list(db: AsyncSession):
+    """存在但零 access 记录的 operator 返回 [](空列表,非 None)。
+
+    与 admin 的 None(=全部账号)严格区分:空列表表示"可见 0 个账号",
+    None 表示"可见全部账号"——语义相反,不能混淆。
+    """
+    operator = Operator(name="lonely", apikey_hash="hl", role="operator")
+    db.add(operator)
+    await db.commit()
+    ids = await visible_account_ids(operator, db)
+    assert ids == []
+    assert ids is not None

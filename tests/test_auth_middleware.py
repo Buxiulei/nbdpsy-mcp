@@ -321,7 +321,7 @@ async def test_exception_handlers_and_unauth_whoami(tmp_path, monkeypatch):
     """app 级异常处理器把鉴权异常转成干净 HTTP,不泄栈成 500。
 
     - 认证通过后路由抛 AuthError → 401 JSON {"error": ...}
-    - 认证通过后路由抛 PermissionError → 403 JSON {"error": ...}
+    - 认证通过后路由抛 AccessDenied → 403 JSON {"error": ...}
     - 未认证打 /api/whoami:中间件先拦,仍 401 不 500(处理器不劣化既有行为)
     """
     tmp_engine = create_async_engine(
@@ -334,18 +334,18 @@ async def test_exception_handlers_and_unauth_whoami(tmp_path, monkeypatch):
     monkeypatch.setattr(db_module, "async_session", tmp_sessionmaker)
     monkeypatch.setattr(config_module.settings, "ROOT_ADMIN_APIKEY", ADMIN_KEY)
 
-    from app.auth.context import AuthError
+    from app.auth.context import AccessDenied, AuthError
 
     app = create_app()
 
-    # 挂两个只在本测试用的路由,分别抛 AuthError / PermissionError,验证处理器转码。
+    # 挂两个只在本测试用的路由,分别抛 AuthError / AccessDenied,验证处理器转码。
     @app.get("/api/_raise_auth")
     async def _raise_auth() -> dict:
         raise AuthError("boom-auth")
 
     @app.get("/api/_raise_perm")
     async def _raise_perm() -> dict:
-        raise PermissionError("boom-perm")
+        raise AccessDenied("boom-perm")
 
     try:
         async with app.router.lifespan_context(app):

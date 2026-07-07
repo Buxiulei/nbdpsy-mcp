@@ -1,9 +1,9 @@
 """RBAC 鉴权助手:把工具/端点的操作收窄到 caller 有权的小红书账号。
 
 三个入口(接口稳定,后续工具大量依赖):
-- require_admin:非 admin 抛 PermissionError(仅管理员可建运营者/授权等操作)。
+- require_admin:非 admin 抛 AccessDenied(仅管理员可建运营者/授权等操作)。
 - assert_account_access:admin 放行;否则须存在 (operator_id, account_id) 的
-  access 行,无则抛 PermissionError。
+  access 行,无则抛 AccessDenied。
 - visible_account_ids:admin 返 None(表示全部账号);否则返其 access 账号 id 列表。
 
 约束:均为纯查询,使用调用方传入的 session(不自开会话、不管理事务边界)。
@@ -14,13 +14,14 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth.context import AccessDenied
 from app.models.operator import Operator, OperatorAccountAccess
 
 
 def require_admin(op: Operator) -> None:
-    """要求 op 为管理员;非 admin 抛 PermissionError。"""
+    """要求 op 为管理员;非 admin 抛 AccessDenied。"""
     if op.role != "admin":
-        raise PermissionError("需要管理员权限")
+        raise AccessDenied("需要管理员权限")
 
 
 async def assert_account_access(
@@ -38,7 +39,7 @@ async def assert_account_access(
         )
     ).first()
     if row is None:
-        raise PermissionError(f"无权操作账号 {account_id}")
+        raise AccessDenied(f"无权操作账号 {account_id}")
 
 
 async def visible_account_ids(

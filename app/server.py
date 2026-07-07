@@ -42,7 +42,7 @@ from fastmcp import FastMCP
 from fastmcp.utilities.lifespan import combine_lifespans
 
 from app.auth.bootstrap import bootstrap_admin
-from app.auth.context import AuthError, current_operator
+from app.auth.context import AccessDenied, AuthError, current_operator
 from app.auth.middleware import ApiKeyMiddleware
 from app.core.db import init_db
 from app.tools import register_all
@@ -79,11 +79,12 @@ def create_app() -> FastAPI:
         """未认证/认证失败 → 401 JSON。"""
         return JSONResponse({"error": str(exc)}, status_code=401)
 
-    @app.exception_handler(PermissionError)
-    async def _handle_permission_error(
-        _request: Request, exc: PermissionError
+    @app.exception_handler(AccessDenied)
+    async def _handle_access_denied(
+        _request: Request, exc: AccessDenied
     ) -> JSONResponse:
-        """越权 → 403 JSON。"""
+        """越权 → 403 JSON。仅映射专用 AccessDenied,不碰内置 PermissionError
+        (后者是 OSError 子类,真实 OS 权限错误应自然走 500,不被误转 403 掩盖真因)。"""
         return JSONResponse({"error": str(exc)}, status_code=403)
 
     # 5. 明文探活 REST:独立于 /mcp,鉴权白名单放行,便于健康检查。
