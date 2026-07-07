@@ -100,6 +100,33 @@ bash scripts/pack_extension.sh            # 打包插件 zip
 - 远程 agent / 插件带 apikey 的方式:HTTP 头 `Authorization: Bearer <apikey>`
   (或 `X-API-Key: <apikey>`)。
 
+### 创建更多管理员
+
+用 root(或任一 admin)的 apikey 让 agent 调管理员工具:
+
+- 新建 admin:`create_operator(name="小李", role="admin")` → 返回一次性明文 apikey。
+- 把已有运营者提权:`update_operator(operator_id=5, role="admin")`;停用:`update_operator(id, enabled=false)`。
+- 分配小红书账号使用权:`grant_account_access(operator_id, xhs_account_id)`;回收:`revoke_account_access(...)`。
+- 只有 admin 能调这些;普通 operator 调会被拒(AccessDenied / 403)。
+
+### 查看账号 / 运营者状态
+
+本服务无前端,查看都通过连了 **admin apikey** 的 agent 调工具:
+
+- **所有小红书账号 + 登录状态**:`list_accounts()`(admin 全见)→ 每个含 `status` /
+  `cookie_status`(valid/invalid/captcha/unknown)/ `last_check_at` / 昵称等(不含 cookie)。
+- **刷新某号实时活性**:`check_cookies(account_id)` → 起浏览器验登录态,把三态写回。
+  想自动周期巡检:设 `COOKIE_CHECK_INTERVAL`(秒,>0 才起,默认 0)。
+- **发布任务状态**:`list_publish_jobs(account_id?, status?)`。
+- **所有运营者**:`list_operators()` → id/name/role/enabled(不含 apikey);某人授权了哪些号:
+  `list_operator_grants(operator_id)`。
+
+不经 agent 快速瞄一眼(直接查库):
+
+```bash
+.venv/bin/python -c "import sqlite3;[print(r) for r in sqlite3.connect('data/nbdpsy.db').execute('select id,name,nickname,status,cookie_status,last_check_at from xhs_accounts')]"
+```
+
 ---
 
 ## 插件配置
