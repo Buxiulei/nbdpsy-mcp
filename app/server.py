@@ -69,6 +69,6 @@ def create_app() -> FastAPI:
     async def healthz() -> dict:
         return {"ok": True}
 
-    # 5. 挂载 MCP 端点。
+    # 5. 挂载 MCP 端点。客户端须用 "/mcp/"(带结尾斜杠);POST "/mcp"(无斜杠)会 307。
     app.mount("/mcp", mcp_app)
     return app
