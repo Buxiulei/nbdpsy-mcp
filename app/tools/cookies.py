@@ -33,7 +33,12 @@ def register_cookies(mcp: FastMCP) -> None:
     async def import_cookies(
         account_name: str, cookies_json: str, user_info: dict | None = None
     ) -> dict:
-        """灌入 cookie:解析 cookies_json 字符串后 upsert 唯一账号,返回 {account_id, created}。"""
+        """手动灌入某号 cookie(解析 cookies_json 后 upsert 唯一账号,返回 {account_id, created})。
+
+        多数情况**不用手动调**:正常"远程登录"是 chrome 插件在操作者真实浏览器登录后自动把
+        cookie 推到后台 /api/cookies/import。本工具用于已有 cookie 的程序化注入。cookies_json
+        是 cookie 对象数组的 JSON 字符串;首次导入新号会自动给当前运营者建 access。
+        """
         operator = current_operator()
         cookies = json.loads(cookies_json)
         async with get_session() as session:

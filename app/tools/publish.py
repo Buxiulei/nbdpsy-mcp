@@ -69,10 +69,13 @@ def register_publish(mcp: FastMCP) -> None:
         topics: list,
         schedule_time: str | None = None,
     ) -> dict:
-        """建一条发布任务并入队(需 access);返回 {job_id, status:'queued'}。
+        """发布一条小红书图文笔记(异步入队,需对该账号有 access)。
 
-        images 每项为 http(s) URL / data URI / {b64,ext};schedule_time 传 ISO8601 字符串
-        表示定时发布(交调度器 scan 循环到期自取),不传则立即入队。
+        仅支持图文(1~N 张图),不支持视频。images 每项为 http(s) URL / data URI / {b64,ext}
+        (agent 在别的机器上也能发,服务端会自行下载/解码);topics 是话题标签列表(自动去重、
+        截断≤10)。schedule_time 传 ISO8601 表示定时发布,不传则立即入队。
+        返回 {job_id, status:'queued'} —— **发布是异步的**,必须用 get_publish_status(job_id)
+        轮询到 published/failed;同一账号的发布自动串行。
         """
         operator = current_operator()
         scheduled_at = _parse_schedule_time(schedule_time)
@@ -98,7 +101,11 @@ def register_publish(mcp: FastMCP) -> None:
 
     @mcp.tool
     async def get_publish_status(job_id: int) -> dict:
-        """查发布任务状态(caller 须对该 job 的账号有 access,否则抛 AccessDenied)。"""
+        """轮询发布任务状态(caller 须对该 job 的账号有 access,否则抛 AccessDenied)。
+
+        status ∈ pending|publishing|published|failed|canceled。published 时返回 note_url
+        (note_id 可能为空,只保证有 note_url);failed 时 error 给原因、retries 是已重试次数。
+        """
         operator = current_operator()
         async with get_session() as session:
             job = await session.get(PublishJob, job_id)
