@@ -64,8 +64,13 @@ def _decode_b64(b64_str: str) -> bytes:
 
 
 def _materialize_base64_dict(item: dict, workdir: Path, index: int) -> Path:
-    """``{b64, ext}`` → 解码落盘。"""
-    data = _decode_b64(item.get("b64", ""))
+    """``{b64, ext}`` → 解码落盘。空/缺 b64 直接抛 ValueError(与 URL 空 body 一致),不写 0 字节文件。"""
+    b64 = item.get("b64", "")
+    if not (b64 or "").strip():
+        raise ValueError(f"base64 图片项为空[{index}]:缺 b64 或为空串")
+    data = _decode_b64(b64)
+    if not data:
+        raise ValueError(f"base64 解码得空数据[{index}]")
     return _write(data, _norm_ext(item.get("ext", "")), workdir, index)
 
 

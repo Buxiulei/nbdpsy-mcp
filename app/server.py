@@ -46,7 +46,7 @@ from app.auth.bootstrap import bootstrap_admin
 from app.auth.context import AccessDenied, AuthError, current_operator
 from app.auth.middleware import ApiKeyMiddleware
 from app.browser.cookie_checker import CookieChecker
-from app.core.config import settings
+from app.core.config import assert_secret_key_configured, settings
 from app.http.cookies_import import router as cookies_import_router
 from app.http.downloads import router as downloads_router
 from app.publish.runtime import set_active_scheduler
@@ -56,6 +56,9 @@ from app.tools import register_all
 
 def create_app() -> FastAPI:
     """构建并返回挂载了 FastMCP 的 FastAPI 应用。"""
+    # 0. 启动闸:生产必须设置非默认 SECRET_KEY(否则 Fernet 加密形同虚设),fail-fast 拒绝起服务。
+    assert_secret_key_configured()
+
     # 1. FastMCP 实例 + 注册全部工具(此刻只 system.health)。
     mcp = FastMCP("nbdpsy-mcp")
     register_all(mcp)

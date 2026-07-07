@@ -12,7 +12,7 @@ images/topics 序列化成 images_json/topics_json 落库;images 每项为 URL/b
 """
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastmcp import FastMCP
 from sqlalchemy import select
@@ -22,6 +22,21 @@ from app.auth.guards import assert_account_access, visible_account_ids
 from app.core.db import get_session
 from app.models.publish_job import PublishJob
 from app.publish.runtime import get_active_scheduler
+
+
+def _parse_schedule_time(raw: str | None) -> datetime | None:
+    """把 ISO8601 schedule_time 解析为 **naive UTC**(与模型/调度器统一的 utcnow 基准一致)。
+
+    tz-aware 输入(如 ``2026-01-01T09:00:00+08:00``)先 astimezone(UTC) 再去掉 tzinfo,存成
+    naive UTC(此例 → 01:00);naive 输入原样返回。否则带 +08:00 的定时时刻会被 scan_once
+    的 ``utcnow()`` 当 UTC 直接比较,早/晚 8 小时发布。
+    """
+    if not raw:
+        return None
+    dt = datetime.fromisoformat(raw)
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
 
 
 def _job_view(job: PublishJob) -> dict:
@@ -60,7 +75,7 @@ def register_publish(mcp: FastMCP) -> None:
         表示定时发布(交调度器 scan 循环到期自取),不传则立即入队。
         """
         operator = current_operator()
-        scheduled_at = datetime.fromisoformat(schedule_time) if schedule_time else None
+        scheduled_at = _parse_schedule_time(schedule_time)
         async with get_session() as session:
             await assert_account_access(operator, account_id, session)
             job = PublishJob(

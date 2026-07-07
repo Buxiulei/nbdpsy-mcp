@@ -231,6 +231,61 @@ async def test_import_no_false_merge_across_user_ids(db: AsyncSession):
     assert total == 2
 
 
+# ---------------- S1:更新路径鉴权 ----------------
+
+
+async def test_import_update_denied_without_access(db: AsyncSession):
+    """S1:无 access 的 operator import 命中既有号(按 user_id)→ 抛 AccessDenied 且 cookie 未变。"""
+    importer = await _make_operator(db, name="importer")
+    acc, _ = await cookie_service.import_cookies(
+        db, importer, "号1", [{"name": "a1", "value": "orig"}], {"user_id": "u1"}
+    )
+
+    other = await _make_operator(db, name="other")
+    try:
+        await cookie_service.import_cookies(
+            db, other, "号1改名", [{"name": "a1", "value": "hijack"}], {"user_id": "u1"}
+        )
+        assert False, "应抛 AccessDenied"
+    except AccessDenied:
+        pass
+    # cookie 未变(仍为 importer 导入的原值,未被越权覆盖)
+    fresh = await db.get(XhsAccount, acc.id)
+    decrypted = json.loads(decrypt_cookies(fresh.login_cookies))
+    assert decrypted[0]["value"] == "orig"
+
+
+async def test_import_update_allowed_with_access(db: AsyncSession):
+    """S1:有 access 的 operator(导入者本人)命中既有号 → 正常更新 cookie。"""
+    importer = await _make_operator(db, name="importer")
+    acc, _ = await cookie_service.import_cookies(
+        db, importer, "号1", [{"name": "a1", "value": "orig"}], {"user_id": "u1"}
+    )
+    acc2, created2 = await cookie_service.import_cookies(
+        db, importer, "号1", [{"name": "a1", "value": "updated"}], {"user_id": "u1"}
+    )
+    assert created2 is False
+    assert acc2.id == acc.id
+    decrypted = json.loads(decrypt_cookies(acc2.login_cookies))
+    assert decrypted[0]["value"] == "updated"
+
+
+async def test_import_update_admin_allowed(db: AsyncSession):
+    """S1:admin 无 access 行也能更新既有号(assert 对 admin 放行)。"""
+    importer = await _make_operator(db, name="importer")
+    acc, _ = await cookie_service.import_cookies(
+        db, importer, "号1", [{"name": "a1", "value": "orig"}], {"user_id": "u1"}
+    )
+    admin = await _make_operator(db, name="boss", role="admin")
+    acc2, created2 = await cookie_service.import_cookies(
+        db, admin, "号1", [{"name": "a1", "value": "byadmin"}], {"user_id": "u1"}
+    )
+    assert created2 is False
+    assert acc2.id == acc.id
+    decrypted = json.loads(decrypt_cookies(acc2.login_cookies))
+    assert decrypted[0]["value"] == "byadmin"
+
+
 # ---------------- get_cookies ----------------
 
 

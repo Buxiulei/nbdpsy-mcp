@@ -481,8 +481,14 @@ class XHSPublishAtomicTasks:
                             current_url = self.page.url
                 else:
                     logger.error("❌ 等待30秒后仍未完成自动认证")
-                    self._take_screenshot("02_01_auto_login_timeout")
-                    raise Exception("创作中心未登录,自动认证失败。请使用远程浏览器手动登录一次。")
+                    # 与 step1 SSO 失败同源:透出独立 need_manual_login 信号(cookie/SSO 坏,
+                    # 重试无用),交状态机直接置 failed 而非当普通失败徒劳重试。
+                    return {
+                        "success": False,
+                        "error": "创作中心未登录,自动认证失败。请使用远程浏览器手动登录一次。",
+                        "screenshot": self._take_screenshot("02_01_auto_login_timeout"),
+                        "need_manual_login": True,
+                    }
 
             url_before_upload = current_url
             logger.info(f"上传前URL: {url_before_upload}")

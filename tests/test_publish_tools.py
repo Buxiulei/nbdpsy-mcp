@@ -16,6 +16,7 @@ check_cookies 的浏览器调用 monkeypatch sync_client.check_login_once(不起
 
 import json
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -36,7 +37,7 @@ from app.publish import runtime as runtime_mod
 from app.publish.queue import AccountLocks
 from app.publish.scheduler import PublishScheduler, make_publish_runner
 from app.tools.cookies import register_cookies
-from app.tools.publish import register_publish
+from app.tools.publish import _parse_schedule_time, register_publish
 
 
 class _FakeScheduler:
@@ -122,6 +123,29 @@ async def _make_job(smk, account_id, **overrides) -> int:
         s.add(job)
         await s.commit()
         return job.id
+
+
+# ---------------- N3:schedule_time 时区归一 ----------------
+
+
+def test_parse_schedule_time_tzaware_to_naive_utc():
+    """N3:+08:00 输入 → 存成 naive UTC(早 8 小时),去掉 tzinfo。"""
+    dt = _parse_schedule_time("2026-01-01T09:00:00+08:00")
+    assert dt == datetime(2026, 1, 1, 1, 0, 0)
+    assert dt.tzinfo is None
+
+
+def test_parse_schedule_time_naive_unchanged():
+    """N3:naive 输入原样返回(不平移、不加 tzinfo)。"""
+    dt = _parse_schedule_time("2026-01-01T09:00:00")
+    assert dt == datetime(2026, 1, 1, 9, 0, 0)
+    assert dt.tzinfo is None
+
+
+def test_parse_schedule_time_none():
+    """N3:None/空 → None(立即入队路径)。"""
+    assert _parse_schedule_time(None) is None
+    assert _parse_schedule_time("") is None
 
 
 # ---------------- publish_note ----------------

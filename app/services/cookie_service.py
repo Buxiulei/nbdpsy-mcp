@@ -124,6 +124,10 @@ async def import_cookies(
             existing = cand
 
     if existing is not None:
+        # S1:命中既有号走更新路径前必须鉴权 —— 否则低权 operator 猜到某号 user_id 即可
+        # 覆盖其 login_cookies(发布劫持 / DoS)。admin 走 assert 内部放行。无权抛
+        # AccessDenied,cookie 未变(此刻尚未 _apply_cookie_state,无待提交改动)。
+        await assert_account_access(operator, existing.id, session)
         _apply_cookie_state(existing, user_info, encrypted)
         await session.commit()
         return existing, False
@@ -143,6 +147,8 @@ async def import_cookies(
                 select(XhsAccount).where(XhsAccount.user_id == user_id)
             )
         ).scalars().first()
+        # S1:回滚重命中同样走更新路径,同步补鉴权(不能因并发绕过 access 校验)。
+        await assert_account_access(operator, existing.id, session)
         _apply_cookie_state(existing, user_info, encrypted)
         await session.commit()
         return existing, False

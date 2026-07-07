@@ -1,5 +1,9 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# SECRET_KEY 出厂占位值:生产(DEBUG=False)必须改成强随机值,否则 create_app 启动 fail-fast。
+# 单一来源:既作 Settings.SECRET_KEY 默认,也作启动闸的比对基准,防两处漂移。
+DEFAULT_SECRET_KEY = "change-me-32bytes-minimum-secret-key"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -19,7 +23,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite+aiosqlite:///./data/nbdpsy.db"
 
     # 安全
-    SECRET_KEY: str = "change-me-32bytes-minimum-secret-key"
+    SECRET_KEY: str = DEFAULT_SECRET_KEY
     ROOT_ADMIN_APIKEY: str = ""
 
     # 数据/上传目录
@@ -47,3 +51,15 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def assert_secret_key_configured() -> None:
+    """N2 启动闸:生产(DEBUG=False)沿用默认 SECRET_KEY 直接 fail-fast。
+
+    默认 key 是公开占位值,用它派生 Fernet 会让存量 cookie 加密形同虚设;上线前必须换成
+    强随机值。DEBUG=True(开发/测试)放行,便于本地与单测跑默认值。放在 create_app 早期调用。
+    """
+    if not settings.DEBUG and settings.SECRET_KEY == DEFAULT_SECRET_KEY:
+        raise RuntimeError(
+            "生产环境必须设置 SECRET_KEY(不能沿用默认占位值);请在 .env 配置强随机 SECRET_KEY"
+        )

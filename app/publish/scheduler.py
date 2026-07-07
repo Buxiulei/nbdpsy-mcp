@@ -64,6 +64,10 @@ def make_publish_runner(
         if not await scheduler.mark_publishing(job_id):
             return
 
+        # C1:占用成功后立刻登记在途 —— 真发布可能墙钟 > PUBLISH_JOB_TIMEOUT,
+        #     recover_stale 据此排除本 job,避免"僵死误判 → 复位 → 重投 → 二次发布"。
+        scheduler._in_flight.add(job_id)
+
         # 临时物料目录:URL/base64 图片落成本地文件的落盘处,发布结束(无论成败)清理。
         workdir = Path(settings.UPLOAD_DIR) / f"job_{job_id}"
 
@@ -111,6 +115,8 @@ def make_publish_runner(
                 job_id, sync_client.PublishResult(success=False, error=str(exc))
             )
         finally:
+            # C1:无论成败先撤销在途登记(finish 已落终态/重排),之后此 job 若再僵死可正常回收
+            scheduler._in_flight.discard(job_id)
             # 清理临时物料目录(成功 / 失败 / 提前 return 都清;不存在则忽略)
             shutil.rmtree(workdir, ignore_errors=True)
 
@@ -140,6 +146,10 @@ class PublishScheduler:
         self._poll_interval = poll_interval
         self._stop_event: asyncio.Event | None = None
         self._loop_task: asyncio.Task | None = None
+        # C1:本进程当前真发布中的 job id(runner 占用后登记、finally 撤销)。recover_stale
+        # 据此排除在途 job,防"墙钟超时误判僵死 → 复位 → 重投 → 二次发布"。进程重启后天然为空
+        # → 所有 publishing 均可回收,崩溃恢复语义不变。
+        self._in_flight: set[int] = set()
 
     def submit(self, job_id: int) -> None:
         """把 job_id 立即投入内部队列(publish_note 无定时发布走此路径,免等下个 scan 周期)。
@@ -186,8 +196,12 @@ class PublishScheduler:
                 .where(PublishJob.status == "publishing")
                 .where(PublishJob.started_at.is_not(None))
                 .where(PublishJob.started_at <= cutoff)
-                .values(status="pending", started_at=None)
             )
+            # C1:排除本进程在途 job —— runner 已占用且仍在真发布中,墙钟超时不等于僵死,
+            # 复位会触发 scan 重投 + 二次发布。集合空(如进程重启后)则不加约束,崩溃恢复语义不变。
+            if self._in_flight:
+                stmt = stmt.where(PublishJob.id.not_in(self._in_flight))
+            stmt = stmt.values(status="pending", started_at=None)
             result = await session.execute(stmt)
             await session.commit()
             return result.rowcount
@@ -213,20 +227,34 @@ class PublishScheduler:
     async def finish(self, job_id: int, result) -> None:
         """落发布结果:成功→published 写 note_id/url;失败→重试排期或耗尽转 failed。
 
-        ``result`` 为 ``sync_client.PublishResult``(鸭子类型:success/note_id/note_url/error)。
-        失败时若 ``retries < len(retry_delays)`` 则按 ``retry_delays[retries]`` 排下次重试并回
-        pending(retries+1、next_retry_at 排期);否则置 failed 写 error。
+        ``result`` 为 ``sync_client.PublishResult``(鸭子类型:success/note_id/note_url/
+        error/need_manual_login)。失败时若 ``retries < len(retry_delays)`` 则按
+        ``retry_delays[retries]`` 排下次重试并回 pending(retries+1、next_retry_at 排期);
+        否则置 failed 写 error。
+
+        - C1 守卫:仅 ``status=='publishing'`` 的 job 可被落终态/重排,非 publishing 一律
+          no-op —— 防"僵死复位后被别处 runner 重占的复活 job / 已 cancel 的 job"被越权覆盖。
+        - I1:``need_manual_login=True``(cookie/SSO 坏)重试无用 → 直接置 failed,**不排重试、
+          retries 不递增**,免每次都拉 Camoufox 再 SSO 失败徒劳消耗。
         """
         now = datetime.utcnow()
         async with self._session_factory() as session:
             job = await session.get(PublishJob, job_id)
             if job is None:
                 return
+            # C1 守卫:非 publishing 态不落 —— 复活的重复 runner / 已 cancel 的 job 不被覆盖
+            if job.status != "publishing":
+                return
             if result.success:
                 job.status = "published"
                 job.note_id = result.note_id
                 job.note_url = result.note_url
                 job.error = None
+            elif getattr(result, "need_manual_login", False):
+                # I1:需人工登录 —— 重试也只会反复 SSO 失败,直接终态 failed,不排重试、不增 retries
+                job.status = "failed"
+                job.started_at = None
+                job.error = result.error or "需要人工登录/重新扫码"
             else:
                 delays = settings.retry_delays
                 if job.retries < len(delays):

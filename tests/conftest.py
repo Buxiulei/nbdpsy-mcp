@@ -5,12 +5,28 @@
 # 为每个测试单建临时 sqlite async engine + sessionmaker,建表 → yield 会话 →
 # 结束 drop/dispose 清理,彻底与生产库文件隔离。后续 Task 0.4 的模型测试复用它。
 
+import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _debug_mode_for_tests():
+    """全测试会话置 DEBUG=True,放行 create_app 的 SECRET_KEY 生产闸(N2)。
+
+    单测用默认占位 SECRET_KEY;生产闸仅在 DEBUG=False 才强制非默认 key。DEBUG 在 app 内除该闸
+    外无其它读取,置 True 无副作用。N2 的闸测试用函数级 monkeypatch 覆写 DEBUG=False 独立验证。
+    """
+    from app.core.config import settings
+
+    original = settings.DEBUG
+    settings.DEBUG = True
+    yield
+    settings.DEBUG = original
 
 
 @pytest_asyncio.fixture

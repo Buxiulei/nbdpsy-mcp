@@ -121,3 +121,18 @@ def test_materialize_unknown_item_raises(tmp_path):
 def test_materialize_empty_list(tmp_path):
     """空列表 → 返回空列表,不建垃圾文件。"""
     assert images.materialize_images([], tmp_path) == []
+
+
+def test_materialize_empty_b64_raises(tmp_path):
+    """N4:空 b64 → ValueError(与 URL 空 body 一致),不写 0 字节文件。"""
+    with pytest.raises(ValueError):
+        images.materialize_images([{"b64": "", "ext": "png"}], tmp_path)
+    # 未写出任何文件
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_materialize_missing_b64_raises(tmp_path):
+    """N4:缺 b64 键 → ValueError,不写 0 字节文件。"""
+    with pytest.raises(ValueError):
+        images.materialize_images([{"ext": "png"}], tmp_path)
+    assert list(tmp_path.iterdir()) == []

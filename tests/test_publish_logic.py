@@ -176,6 +176,38 @@ def test_normalize_cookies_non_xhs_domain_no_creator_fallback():
     assert out[0]["domain"] == ".other.com"
 
 
+# ── I1:step2 SSO 失败的 need_manual_login 透出(不被 publish_note 丢弃) ──
+
+def test_publish_note_propagates_step2_need_manual_login(monkeypatch):
+    """I1:step2 上传时 SSO 失败(need_manual_login=True)→ publish_note 透出该独立信号。
+
+    过去 step2 分支只带 error 不带 need_manual_login,信号被丢弃 → 状态机当普通失败徒劳重试。
+    """
+    from app.browser import sync_client as sc
+
+    class _FakeAtomic:
+        def __init__(self, page):
+            self.page = page
+
+        def step1_open_publish_page(self):
+            return {"success": True, "url": "https://creator.xiaohongshu.com/publish"}
+
+        def step2_upload_images(self, image_paths):
+            return {
+                "success": False,
+                "error": "创作中心未登录,自动认证失败。请使用远程浏览器手动登录一次。",
+                "need_manual_login": True,
+            }
+
+    monkeypatch.setattr(sc, "XHSPublishAtomicTasks", _FakeAtomic)
+
+    client = sc.SyncClient(account_id=1, cookies=[])
+    result = client.publish_note("标题", "正文", ["/tmp/a.png"], ["#心理"])
+    assert result["success"] is False
+    assert result["need_manual_login"] is True
+    assert "创作中心未登录" in result["error"]
+
+
 # ── import 冒烟(守 CI 不出 ImportError;真实发布留 P3.5/P5 e2e) ──
 
 def test_publish_modules_import_and_public_surface():

@@ -304,7 +304,13 @@ class SyncClient:
             if image_paths:
                 r = atomic.step2_upload_images(image_paths)
                 if not r.get("success"):
-                    return {"success": False, "error": r.get("error")}
+                    # 与 step1 同源:透出 step2 SSO 失败的 need_manual_login,交状态机直接置
+                    # failed 而非徒劳重试(否则该独立信号在此层被丢弃,I1 修复形同虚设)。
+                    return {
+                        "success": False,
+                        "error": r.get("error"),
+                        "need_manual_login": r.get("need_manual_login", False),
+                    }
                 logger.info(f"✓ 已上传 {r.get('uploaded_count')} 张图片")
             else:
                 logger.info("跳过图片上传(无图片)")

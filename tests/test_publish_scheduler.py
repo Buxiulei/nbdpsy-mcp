@@ -93,13 +93,18 @@ async def test_state_machine_success(db_factory):
 
 
 async def test_retry_then_fail(db_factory):
-    """连续 finish(fail):retry_delays 长度次内排期回 pending,再一次转 failed。"""
+    """连续 finish(fail):retry_delays 长度次内排期回 pending,再一次转 failed。
+
+    finish 有 C1 守卫(仅 publishing 态可落),故每次 finish 前先 mark_publishing 复刻真实
+    runner 流程(占用 → 发布 → finish);重试后回 pending,下一轮再占用。
+    """
     account_id = await _make_account(db_factory)
     job_id = await _make_job(db_factory, account_id)
     scheduler = PublishScheduler(db_factory)
     delays = settings.retry_delays
 
     for i in range(len(delays)):
+        assert await scheduler.mark_publishing(job_id) is True  # pending → publishing
         before = datetime.utcnow()
         await scheduler.finish(job_id, PublishResult(success=False, error=f"boom{i}"))
         job = await _get_job(db_factory, job_id)
@@ -112,6 +117,7 @@ async def test_retry_then_fail(db_factory):
         assert job.next_retry_at >= before + timedelta(seconds=delays[i] - 1)
 
     # 重试额度耗尽:再一次失败 → failed(终态)
+    assert await scheduler.mark_publishing(job_id) is True
     await scheduler.finish(job_id, PublishResult(success=False, error="final"))
     job = await _get_job(db_factory, job_id)
     assert job.status == "failed"
@@ -147,6 +153,93 @@ async def test_recover_stale(db_factory):
     fresh = await _get_job(db_factory, fresh_id)
     assert fresh.status == "publishing"
     assert fresh.started_at is not None
+
+
+# ---------------- C1:recover_stale 排除在途 job ----------------
+
+
+async def test_recover_stale_skips_in_flight(db_factory):
+    """C1:in_flight 里的 stale job 不复位(真发布中,墙钟超时不算僵死);不在 in_flight 的复位。"""
+    account_id = await _make_account(db_factory)
+    stale_started = datetime.utcnow() - timedelta(
+        seconds=settings.PUBLISH_JOB_TIMEOUT + 60
+    )
+    in_flight_id = await _make_job(
+        db_factory, account_id, status="publishing", started_at=stale_started
+    )
+    orphan_id = await _make_job(
+        db_factory, account_id, status="publishing", started_at=stale_started
+    )
+
+    scheduler = PublishScheduler(db_factory)
+    # 模拟 runner 已占用 in_flight_id 仍在真发布中(墙钟已超时)
+    scheduler._in_flight.add(in_flight_id)
+
+    recovered = await scheduler.recover_stale()
+    assert recovered == 1  # 只复位 orphan,in_flight 的被排除
+
+    in_flight = await _get_job(db_factory, in_flight_id)
+    assert in_flight.status == "publishing"  # 未复位
+    assert in_flight.started_at is not None
+
+    orphan = await _get_job(db_factory, orphan_id)
+    assert orphan.status == "pending"  # 复位
+    assert orphan.started_at is None
+
+
+# ---------------- C1:finish 守卫仅 publishing 态可落 ----------------
+
+
+async def test_finish_noop_on_canceled_job(db_factory):
+    """C1:finish 对 status='canceled' 的 job → no-op(仍 canceled,不被越权覆盖成 published)。"""
+    account_id = await _make_account(db_factory)
+    job_id = await _make_job(db_factory, account_id, status="canceled")
+    scheduler = PublishScheduler(db_factory)
+
+    await scheduler.finish(
+        job_id, PublishResult(success=True, note_id="x", note_url="https://xhs/x")
+    )
+    job = await _get_job(db_factory, job_id)
+    assert job.status == "canceled"  # 仍 canceled
+    assert job.note_id is None
+    assert job.note_url is None
+
+
+async def test_finish_acts_on_publishing_job(db_factory):
+    """C1:finish 对 'publishing' 态 → 正常落终态 published。"""
+    account_id = await _make_account(db_factory)
+    job_id = await _make_job(db_factory, account_id, status="publishing")
+    scheduler = PublishScheduler(db_factory)
+
+    await scheduler.finish(
+        job_id, PublishResult(success=True, note_id="nid", note_url="https://xhs/9")
+    )
+    job = await _get_job(db_factory, job_id)
+    assert job.status == "published"
+    assert job.note_id == "nid"
+
+
+# ---------------- I1:need_manual_login 立即置 failed 不重试 ----------------
+
+
+async def test_finish_need_manual_login_fails_immediately(db_factory):
+    """I1:finish(need_manual_login=True) → 立即 failed、retries 未增、无 next_retry_at。"""
+    account_id = await _make_account(db_factory)
+    job_id = await _make_job(db_factory, account_id, status="publishing")
+    scheduler = PublishScheduler(db_factory)
+
+    await scheduler.finish(
+        job_id,
+        PublishResult(
+            success=False, error="创作中心未登录", need_manual_login=True
+        ),
+    )
+    job = await _get_job(db_factory, job_id)
+    assert job.status == "failed"  # 立即终态,不排重试
+    assert job.retries == 0  # 未递增
+    assert job.next_retry_at is None  # 无重试排期
+    assert job.started_at is None
+    assert "创作中心未登录" in job.error
 
 
 # ---------------- 双重占用去重 ----------------
