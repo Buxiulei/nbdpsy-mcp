@@ -45,6 +45,7 @@ import app.core.db as db_module
 from app.auth.bootstrap import bootstrap_admin
 from app.auth.context import AccessDenied, AuthError, current_operator
 from app.auth.middleware import ApiKeyMiddleware
+from app.browser.account_locks import account_locks
 from app.browser.cookie_checker import CookieChecker
 from app.core.config import assert_secret_key_configured, settings
 from app.http.cookies_import import router as cookies_import_router
@@ -106,7 +107,9 @@ def create_app() -> FastAPI:
     async def app_lifespan(_app: FastAPI):
         await db_module.init_db()
         await bootstrap_admin()
-        scheduler = PublishScheduler(db_module.async_session)
+        # 传入进程级共享 account_locks:发布链与 cookie 检测后台任务共用同一把 per-account 锁,
+        # 同号浏览器操作串行,避免 SyncClient.start() 的 kill_orphans 误杀对方在跑的浏览器。
+        scheduler = PublishScheduler(db_module.async_session, account_locks=account_locks)
         scheduler.start()
         set_active_scheduler(scheduler)
         # 可选后台 cookie 巡检:仅在配置 >0 时起(逐个号跑登录检测并写回状态,号间隔防频控)。

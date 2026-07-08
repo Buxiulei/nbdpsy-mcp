@@ -29,10 +29,10 @@
 
 ## 3. 首跑验证（**本 build 未对真 XHS 账号跑过，务必走一遍**）
 
-- [ ] **远程 agent 连通**：用某 operator 的 apikey（`Authorization: Bearer <key>`）连 `PUBLIC_BASE_URL/mcp/`（注意结尾斜杠），`initialize` + `tools/list` 应见 22 工具；`health`/`whoami` 通。
+- [ ] **远程 agent 连通**：用某 operator 的 apikey（`Authorization: Bearer <key>`）连 `PUBLIC_BASE_URL/mcp/`（注意结尾斜杠），`initialize` + `tools/list` 应见 24 工具；`health`/`whoami` 通。
 - [ ] **建 operator + 授权**：admin apikey 调 `create_operator`（记下一次性明文 apikey）→ `grant_account_access`。
 - [ ] **装插件登录**：`get_extension_download` → 下载 → chrome://extensions 开发者模式加载已解压目录 → 填 `serverUrl`(=PUBLIC_BASE_URL) 与 operator apikey → **勾选"在无痕模式下启用"**（MV3 限制，manifest 声明不了）→ 隐身窗口人工完成登录+验证 → cookie 自动推回。
-- [ ] **验 cookie**：`check_cookies(account_id)` 返 `valid` + 回填资料。（注意：浏览器启动失败也会保守归 `invalid`，不等于 cookie 真失效——首跑盯一下。）
+- [ ] **验 cookie**：`check_cookies(account_id)` **异步**——立即返 `check_id`，随后用 `get_cookie_check(check_id)` 轮询到终态 `valid`/`invalid`/`captcha`/`error`。`valid` 附回填资料；`error` 是浏览器启动失败等基础设施故障（**不写回、保留原状态**，不等于 cookie 真失效——首跑盯一下）。
 - [ ] **试发一条**：`publish_note(...)` → 轮询 `get_publish_status(job_id)` 到 `published`。**盯发布确认**：成功页只停 ~3s，代码已做"确认即立即收口"防重复发帖——首跑确认不出现重复发帖。
 - [ ] **权限隔离**：换一个无该号 access 的 operator，确认 `publish_note`/`get_cookies` 对该号抛 403。
 
