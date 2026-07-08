@@ -81,7 +81,10 @@ def create_app() -> FastAPI:
     register_all(mcp)
 
     # 2. Streamable HTTP ASGI app(子 app 内路径 "/",挂到父应用 /mcp)。
-    mcp_app = mcp.http_app(path="/")
+    #    关掉 MCP 传输层的 Host/Origin(DNS-rebinding)防护:它默认只放行 localhost,经反代/隧道
+    #    进来的公网 Host(如 mcp.nbdpsy.com)会被判 421 Misdirected Request。本服务真正的鉴权是
+    #    apikey 中间件(每个 /mcp 调用都要 Bearer),该防护针对"浏览器 DNS rebinding"在此冗余。
+    mcp_app = mcp.http_app(path="/", host_origin_protection=False)
 
     # 3. 父应用 lifespan:建表 → 引导 root 管理员 → 起发布调度器(队列 worker + scan 循环)→
     #    可选起 cookie 周期巡检;需与 mcp_app.lifespan 组合以启动 session manager。发布调度器

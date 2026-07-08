@@ -110,3 +110,57 @@ async def test_mcp_endpoint_wired_via_real_lifespan(tmp_path, monkeypatch):
     # 按实际返回体断言 200 + 含 protocolVersion 字样即可,不强解析 SSE 格式。
     assert r.status_code == 200
     assert "protocolVersion" in r.text
+
+
+@pytest.mark.asyncio
+async def test_mcp_accepts_public_host_header(tmp_path, monkeypatch):
+    """经反代/隧道进来的公网 Host(如 mcp.nbdpsy.com)不应被 MCP 传输层的
+    DNS-rebinding 防护判 421 Misdirected Request。
+
+    回归目标:MCP Streamable HTTP 默认只放行 localhost 类 Host,公网域名会 421;
+    create_app() 用 host_origin_protection=False 关掉该防护(apikey 才是真鉴权)。
+    若有人改回默认,本测试会以 421 失败。base_url 决定 httpx 发出的 Host 头。
+    """
+    tmp_engine = create_async_engine(
+        f"sqlite+aiosqlite:///{tmp_path}/t.db", future=True
+    )
+    tmp_sessionmaker = async_sessionmaker(
+        tmp_engine, class_=AsyncSession, expire_on_commit=False
+    )
+    monkeypatch.setattr(db_module, "engine", tmp_engine)
+    monkeypatch.setattr(db_module, "async_session", tmp_sessionmaker)
+    from app.core import config as config_module
+
+    admin_key = "public-host-test-admin-key"
+    monkeypatch.setattr(config_module.settings, "ROOT_ADMIN_APIKEY", admin_key)
+
+    app = create_app()
+    try:
+        async with app.router.lifespan_context(app):
+            # base_url 用公网域名 → httpx 发出 Host: mcp.nbdpsy.com
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://mcp.nbdpsy.com"
+            ) as c:
+                r = await c.post(
+                    "/mcp/",
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "initialize",
+                        "params": {
+                            "protocolVersion": "2025-06-18",
+                            "capabilities": {},
+                            "clientInfo": {"name": "t", "version": "0"},
+                        },
+                    },
+                    headers={
+                        "Accept": "application/json, text/event-stream",
+                        "Authorization": f"Bearer {admin_key}",
+                    },
+                )
+    finally:
+        await tmp_engine.dispose()
+
+    assert r.status_code != 421, "公网 Host 被 DNS-rebinding 防护判 421,host_origin_protection 未关"
+    assert r.status_code == 200
+    assert "protocolVersion" in r.text
