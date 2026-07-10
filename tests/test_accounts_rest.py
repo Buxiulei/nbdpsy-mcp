@@ -118,6 +118,18 @@ async def test_list_accounts_without_apikey_401(tmp_path, monkeypatch):
         assert r.status_code == 401
 
 
+async def test_list_accounts_invalid_apikey_401(tmp_path, monkeypatch):
+    """带一个库里不存在的 Bearer token GET /api/accounts → 401
+    (覆盖中间件"apikey 存在但查不到 operator"分支,即 op is None,与缺失 apikey 是不同分支)。
+    """
+    async with isolated_client(tmp_path, monkeypatch) as (c, _key):
+        r = await c.get(
+            "/api/accounts",
+            headers={"Authorization": "Bearer this-apikey-does-not-exist-in-db"},
+        )
+        assert r.status_code == 401
+
+
 async def test_list_accounts_operator_sees_only_granted(tmp_path, monkeypatch):
     """非 admin operator 只见被 grant 的号(RBAC 收窄)。"""
     async with isolated_client(tmp_path, monkeypatch) as (c, _key):
@@ -157,6 +169,33 @@ async def test_get_cookies_with_access_returns_decrypted(tmp_path, monkeypatch):
         cookies = body["cookies"]
         assert cookies[0]["name"] == "a1"
         assert cookies[0]["value"] == "秘"
+
+
+async def test_get_cookies_operator_with_access_returns_decrypted(
+    tmp_path, monkeypatch
+):
+    """operator 有 access:自己的 apikey GET /api/accounts/{id}/cookies → 200 返回解密 cookies
+    (现有测试只覆盖 admin 正向 + operator 负向,这里补 operator 正向)。
+    """
+    async with isolated_client(tmp_path, monkeypatch) as (c, _key):
+        acc = await _seed_account(
+            "号F", "uF", [{"name": "a1", "value": "秘F", "sameSite": "lax"}]
+        )
+        op_key = "operator-plain-key-rest-access-ok-01"
+        op_id = await _make_operator(op_key)
+        async with db_module.async_session() as s:
+            await operator_service.grant_access(s, op_id, acc, op_id)
+
+        r = await c.get(
+            f"/api/accounts/{acc}/cookies",
+            headers={"Authorization": f"Bearer {op_key}"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["account_id"] == acc
+        cookies = body["cookies"]
+        assert cookies[0]["name"] == "a1"
+        assert cookies[0]["value"] == "秘F"
 
 
 async def test_get_cookies_without_access_403(tmp_path, monkeypatch):

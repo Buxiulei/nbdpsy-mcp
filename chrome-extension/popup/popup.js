@@ -30,6 +30,10 @@ const elements = {
 let currentCookies = [];
 let currentUserInfo = null;
 let serverUrl = 'https://mcp.nbdpsy.com';
+// 已持久化到 storage 的 apikey（与 service-worker.js 的 getConfig 同源）。
+// 列表加载 / 点击注入的准入判断都从这里读，不直接读输入框，避免"改了输入框没保存"导致
+// 列表按新 key 拉、注入却用旧 storage key 的不一致。
+let savedApikey = '';
 
 document.addEventListener('DOMContentLoaded', async () => {
     console.log('[NBDpsy] Popup 加载');
@@ -63,6 +67,7 @@ async function loadConfig() {
         chrome.runtime.sendMessage({ action: 'getConfig' }, (response) => {
             if (response && response.success) {
                 serverUrl = response.serverUrl;
+                savedApikey = response.apikey || '';
                 elements.serverUrl.value = response.serverUrl || '';
                 elements.apikey.value = response.apikey || '';
             }
@@ -191,8 +196,10 @@ const ACCOUNT_STATUS_LABEL = {
 const AVATAR_FALLBACK = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23999"><circle cx="12" cy="8" r="4"/><ellipse cx="12" cy="18" rx="7" ry="4"/></svg>';
 
 // 从后台拉取当前 apikey 可见的账号并渲染卡片列表。
+// key 取已保存的 savedApikey（与注入路径同源的 storage 值），不直接读输入框——
+// 否则用户改了输入框但没点"保存配置"时，列表会按新 key 拉、而点击注入仍用 storage 里的旧 key。
 async function loadAccounts() {
-    const key = elements.apikey.value.trim();
+    const key = savedApikey;
     const base = serverUrl.replace(/\/+$/, '');
     if (!base || !key) {
         renderAccountsEmpty('填好服务器地址与 apikey 后加载账号');
@@ -283,7 +290,7 @@ function buildAccountCard(acc) {
 // 点击账号卡片：触发 service worker 开无痕窗注入。聚焦新窗口会关闭 popup，
 // 故这里只"点火"，结果由 SW 写入 storage，popup 下次打开或仍在时经 onChanged 展示。
 async function openAccountSessionFromCard(accountId) {
-    if (!elements.apikey.value.trim()) {
+    if (!savedApikey) {
         showMessage('error', '请先填写并保存 apikey');
         return;
     }
@@ -324,6 +331,7 @@ async function saveConfig() {
 
     serverUrl = newUrl;
     await sendMessage({ action: 'setConfig', serverUrl: newUrl, apikey: newKey });
+    savedApikey = newKey;
 
     // 探活后台（/healthz 免鉴权）
     showServerStatus('info', '正在测试连接...');
