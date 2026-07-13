@@ -43,14 +43,13 @@ from fastmcp.utilities.lifespan import combine_lifespans
 
 import app.core.db as db_module
 from app.auth.bootstrap import bootstrap_admin
-from app.auth.context import AccessDenied, AuthError, current_operator
+from app.auth.context import AccessDenied, AuthError
 from app.auth.middleware import ApiKeyMiddleware
 from app.browser.account_locks import account_locks
 from app.browser.cookie_checker import CookieChecker
 from app.core.config import assert_secret_key_configured, settings
-from app.http.accounts_rest import router as accounts_rest_router
-from app.http.cookies_import import router as cookies_import_router
-from app.http.downloads import router as downloads_router
+from app.core.errors import NotFoundError
+from app.http import ALL_ROUTERS
 from app.publish.runtime import set_active_scheduler
 from app.publish.scheduler import PublishScheduler
 from app.tools import register_all
@@ -151,26 +150,26 @@ def create_app() -> FastAPI:
         (后者是 OSError 子类,真实 OS 权限错误应自然走 500,不被误转 403 掩盖真因)。"""
         return JSONResponse({"error": str(exc)}, status_code=403)
 
+    @app.exception_handler(NotFoundError)
+    async def _handle_not_found(_request: Request, exc: NotFoundError) -> JSONResponse:
+        """资源不存在 → 404 JSON。"""
+        return JSONResponse({"error": str(exc)}, status_code=404)
+
+    @app.exception_handler(ValueError)
+    async def _handle_value_error(_request: Request, exc: ValueError) -> JSONResponse:
+        """入参非法 → 400 JSON(NotFoundError 是其子类但按精确类优先走 404)。"""
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
     # 5. 明文探活 REST:独立于 /mcp,鉴权白名单放行,便于健康检查。
     @app.get("/healthz")
     async def healthz() -> dict:
         return {"ok": True}
 
-    # 6. 受保护探针 REST:中间件校验通过后,读取上下文里的当前运营者(验证 ContextVar 穿透 REST 路由)。
-    @app.get("/api/whoami")
-    async def whoami() -> dict:
-        op = current_operator()  # 未认证时中间件已拦截返回 401,此处必有运营者
-        return {"name": op.name, "role": op.role}
+    # 6. 挂载全部 REST 路由(system/manifest/accounts/cookies-import/downloads);
+    #    鉴权由 apikey 中间件按路径白名单统一把关,注册顺序见 app/http/__init__.py。
+    for r in ALL_ROUTERS:
+        app.include_router(r)
 
-    # 7. 挂载 REST 路由:插件推 cookie 端点。路径不在中间件白名单,自动受 apikey 保护。
-    app.include_router(cookies_import_router)
-
-    # 7.0.1 挂载"我的账号"REST:列表 + 取解密 cookie(插件无痕注入用)。同样不在白名单,受 apikey 保护。
-    app.include_router(accounts_rest_router)
-
-    # 7.1 挂载插件包下载端点。路径落在中间件白名单 /downloads 前缀,无需 apikey 即可下载。
-    app.include_router(downloads_router)
-
-    # 8. 挂载 MCP 端点。客户端须用 "/mcp/"(带结尾斜杠);POST "/mcp"(无斜杠)会 307。
+    # 7. 挂载 MCP 端点。客户端须用 "/mcp/"(带结尾斜杠);POST "/mcp"(无斜杠)会 307。
     app.mount("/mcp", mcp_app)
     return app

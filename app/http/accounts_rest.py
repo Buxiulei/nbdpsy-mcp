@@ -17,6 +17,25 @@ from app.services import account_service, cookie_service
 
 router = APIRouter()
 
+MANIFEST_ENTRIES = [
+    {
+        "method": "GET", "path": "/api/accounts",
+        "summary": "列出 caller 可见的小红书账号(operator 只见被授权的,admin 全见)",
+        "admin_only": False, "params": {},
+        "returns": "{accounts: [{id, name, nickname, user_id, red_id, avatar, status, cookie_status, last_check_at, last_login_at, created_at}]}",
+        "errors": "",
+        "notes": "刻意不含 cookie 明文;cookie_status/last_check_at 可做廉价活性预检。",
+    },
+    {
+        "method": "GET", "path": "/api/accounts/{account_id}/cookies",
+        "summary": "解密回读某号 cookie(受授权限制)",
+        "admin_only": False, "params": {"account_id": "path,int"},
+        "returns": "{account_id, cookies: [cookie 对象]}",
+        "errors": "403=无该号授权",
+        "notes": "用于把 cookie 注入自己的浏览器等程序化场景。",
+    },
+]
+
 
 @router.get("/api/accounts")
 async def list_accounts_endpoint() -> dict:

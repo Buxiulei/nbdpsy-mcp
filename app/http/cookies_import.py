@@ -14,6 +14,18 @@ from app.services import cookie_service
 
 router = APIRouter()
 
+MANIFEST_ENTRIES = [{
+    "method": "POST", "path": "/api/cookies/import",
+    "summary": "灌入某号 cookie(upsert 唯一账号行)",
+    "admin_only": False,
+    "params": {"account_name": "body,str", "cookies": "body,list[cookie 对象]",
+               "user_info": "body,dict|None(user_id/nickname/red_id/avatar)"},
+    "returns": "{account_id, created}",
+    "errors": "422=缺字段",
+    "notes": "正常远程登录由 chrome 插件登录后自动推本端点,多数情况不用手调;"
+             "user_info.user_id 是 upsert 去重键;首次导入新号自动给导入者建授权。",
+}]
+
 
 class CookiesImportRequest(BaseModel):
     """插件推送体:账号内部展示名 + cookie 列表 + 可选 user_info(回填 nickname/user_id 等)。"""

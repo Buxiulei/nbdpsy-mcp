@@ -1,5 +1,23 @@
-"""HTTP(REST)端点包:承载 chrome 插件推送等非 MCP 的 HTTP 接口。
+"""REST 路由注册表:server.py 统一 include;manifest 聚合各模块端点元数据。
 
-各端点在 server.create_app 里 include_router 挂到父 FastAPI;鉴权由 apikey 中间件统一
-承担(端点路径不在白名单 → 自动受保护),端点内用 current_operator() 读取当前运营者。
+新增 router 模块的接线口就在这里:import 模块 → ALL_ROUTERS 加 router →
+ALL_MANIFEST_ENTRIES 拼其 MANIFEST_ENTRIES(/api/* 之外的路由如 downloads 不进 manifest)。
+漏接会被 tests/test_manifest.py 防漂移测试逮住。
 """
+
+from app.http import accounts_rest, cookies_import, downloads, manifest, system
+
+ALL_ROUTERS = [
+    system.router,
+    manifest.router,
+    accounts_rest.router,
+    cookies_import.router,
+    downloads.router,
+]
+
+ALL_MANIFEST_ENTRIES = [
+    *system.MANIFEST_ENTRIES,
+    *manifest.MANIFEST_ENTRIES,
+    *accounts_rest.MANIFEST_ENTRIES,
+    *cookies_import.MANIFEST_ENTRIES,
+]
