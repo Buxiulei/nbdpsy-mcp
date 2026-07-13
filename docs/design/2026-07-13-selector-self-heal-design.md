@@ -35,7 +35,8 @@ def snapshot_interactive(page) -> list[dict]:
     选择器集:a, button, input, select, textarea, [role=button/link/tab/menuitem],
     [onclick], [contenteditable], [tabindex]。每元素:
     {ref:int(1..N), tag, role, text(≤50), attrs:{id,class,name,type,placeholder,
-     aria-label,data-testid}(各≤80), bbox:{x,y,width,height}, visible:bool}。
+     aria-label,data-testid,contenteditable}(各≤80), bbox:{x,y,width,height}, visible:bool}。
+     (contenteditable 必收:输入类 safety 靠它放行富文本编辑器,小红书正文即 div[contenteditable=true])。
     仅收视口内可见元素;ref 从 1 递增,>100 即 break。"""
 
 def build_snapshot_text(elements: list[dict]) -> str:
@@ -56,8 +57,12 @@ class SelfHealLocator:
     def locate(self, page, intent_key: str, intent_desc: str) -> tuple[ElementHandle, str | None] | None:
         """收口:snapshot → build_text → llm_locate(得 ref)→ 在快照里取该 ref 元素 →
         安全校验(见下,不过 → None)→ 派生选择器;能派生则 page.query_selector 拿 handle,
-        不能则用 bbox 中心 elementFromPoint 拿 handle → 返回 (handle, selector)(selector 可
-        为 None,表示走的坐标点击、无稳定选择器可学)。任一步失败 → None(不抛异常)。
+        **并比对 handle.bounding_box() 与快照 el 的 bbox(中心点误差阈值内)确认是同一元素**——
+        query_selector 返回文档序首个匹配,若选择器退化成 tag/tag.class 可能命中另一个同类元素
+        (safety 校验的是快照 el,却对错元素操作 + 把坏选择器 learn 进 registry 毒化)。bbox 不符
+        则弃该选择器、走坐标兜底且 selector=None;派生不出/命中不符则用 bbox 中心 elementFromPoint
+        拿 handle → 返回 (handle, selector)(selector 可为 None,表示走坐标点击、无稳定选择器可学)。
+        任一步失败 → None(不抛异常)。
 
         **不依赖 registry**:持久化学习由挂载点(_find_element_with_retry)在拿到 (handle,
         selector) 后调 registry.learn 完成——self_heal 只管定位,registry 只管持久化,两者
