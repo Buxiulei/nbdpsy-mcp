@@ -20,6 +20,12 @@
 // 后台默认地址（对应后端 config.PUBLIC_BASE_URL 默认值），操作者可在 popup 覆盖。
 const DEFAULT_SERVER_URL = 'https://mcp.nbdpsy.com';
 
+// 未授予无痕权限时的统一指引：chrome.windows.create({incognito:true}) 在无权限下
+// 仍会弹出无痕窗口，但返回给插件的窗口对象是 null（该窗口对本插件不可见）。
+const ERR_NO_INCOGNITO_ACCESS =
+    '无痕窗口对插件不可见：请到 chrome://extensions → 本插件「详情」→ 开启'
+    + '「在无痕模式下启用」，然后重试（刚弹出的那个无痕窗口可以直接关掉）。';
+
 // 读取 serverUrl + apikey 配置。
 function getConfig() {
     return new Promise((resolve) => {
@@ -208,6 +214,11 @@ async function startRemoteLogin() {
             height: randomSize.height,
             url: 'https://www.xiaohongshu.com'
         });
+        // 插件没拿到无痕权限时,Chrome 照样弹出无痕窗口,但对插件返回 null(窗口对本插件不可见)。
+        // 不拦这一下,后面读 .id 就是天书 TypeError,底下那句友好提示永远到不了。
+        if (!loginWindow) {
+            throw new Error(ERR_NO_INCOGNITO_ACCESS);
+        }
         const windowId = loginWindow.id;
         console.log(`[NBDpsy] 无痕登录窗口已创建，窗口 ID: ${windowId}`);
 
@@ -540,6 +551,10 @@ async function openAccountSession(accountId) {
         state: 'maximized',
         url: 'about:blank'
     });
+    // 同 startRemoteLogin:没无痕权限时窗口对插件返回 null,拦下来给人话而非 TypeError。
+    if (!win) {
+        return { success: false, error: ERR_NO_INCOGNITO_ACCESS };
+    }
     const windowId = win.id;
     console.log(`[NBDpsy] 无痕窗口已创建，窗口 ID: ${windowId}`);
 

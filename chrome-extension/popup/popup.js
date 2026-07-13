@@ -183,14 +183,19 @@ function showRemoteResult(r) {
 
 // ── 我的账号：列出后台托管账号 → 点卡片开无痕窗注入 ──
 
-// cookie_status → 中文徽标文案（禁 emoji）。
+// cookie_status → 中文徽标文案（禁 emoji）。checking 为检测进行中的瞬时态（非库值）。
 const ACCOUNT_STATUS_LABEL = {
     valid: '有效',
     invalid: '失效',
     captcha: '验证',
     error: '异常',
-    unknown: '未检测'
+    unknown: '未检测',
+    checking: '检测中...'
 };
+
+// 检测轮询节奏：每 CHECK_POLL_INTERVAL 轮一次，最多 CHECK_POLL_MAX 次（约 60s 超时）。
+const CHECK_POLL_INTERVAL = 2500;
+const CHECK_POLL_MAX = 24;
 
 // 头像兜底占位（内联 SVG data URI，禁 emoji）。
 const AVATAR_FALLBACK = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23999"><circle cx="12" cy="8" r="4"/><ellipse cx="12" cy="18" rx="7" ry="4"/></svg>';
@@ -249,10 +254,10 @@ function renderAccounts(accounts) {
     }
 }
 
-// 用 DOM API 构造卡片（名称用 textContent 防注入），点击即触发无痕注入。
+// 用 DOM API 构造卡片（名称用 textContent 防注入）。卡片是 div（不能用 button，
+// 内部要嵌「检测」「打开」两个动作按钮，button 不可嵌套）。检测=验 cookie 活性；打开=开无痕注入。
 function buildAccountCard(acc) {
-    const card = document.createElement('button');
-    card.type = 'button';
+    const card = document.createElement('div');
     card.className = 'account-card';
     card.dataset.accountId = acc.id;
 
@@ -273,18 +278,124 @@ function buildAccountCard(acc) {
     const badge = document.createElement('span');
     badge.className = `account-badge ${status}`;
     badge.textContent = ACCOUNT_STATUS_LABEL[status] || status;
+    // 徽标挂到卡片上，检测轮询时原地改文案/配色，无需重渲染整卡。
+    card.dataset.badge = '';
     meta.appendChild(name);
     meta.appendChild(badge);
 
-    const openIcon = document.createElement('span');
-    openIcon.className = 'account-open-icon';
-    openIcon.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>';
+    const actions = document.createElement('span');
+    actions.className = 'account-actions';
+
+    // 检测按钮：触发后端 cookie 活性巡检并在本卡轮询到终态。
+    const detectBtn = document.createElement('button');
+    detectBtn.type = 'button';
+    detectBtn.className = 'account-detect-btn';
+    detectBtn.textContent = '检测';
+    detectBtn.title = '检测该账号 cookie 是否仍有效';
+    detectBtn.addEventListener('click', () =>
+        triggerCookieCheck(acc.id, badge, detectBtn));
+
+    // 打开按钮：开无痕窗注入该号 cookie 打开小红书。
+    const openBtn = document.createElement('button');
+    openBtn.type = 'button';
+    openBtn.className = 'account-open-btn';
+    openBtn.title = '开无痕窗口注入该账号 cookie 打开小红书';
+    openBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>';
+    openBtn.addEventListener('click', () => openAccountSessionFromCard(acc.id));
+
+    actions.appendChild(detectBtn);
+    actions.appendChild(openBtn);
 
     card.appendChild(avatar);
     card.appendChild(meta);
-    card.appendChild(openIcon);
-    card.addEventListener('click', () => openAccountSessionFromCard(acc.id));
+    card.appendChild(actions);
     return card;
+}
+
+// 把徽标原地改成某状态（含 checking 瞬时态）；复用 ACCOUNT_STATUS_LABEL 与配色 class。
+function setBadge(badge, status, textOverride) {
+    badge.className = `account-badge ${status}`;
+    badge.textContent = textOverride || ACCOUNT_STATUS_LABEL[status] || status;
+}
+
+// 触发后端 cookie 活性巡检并在本卡轮询到终态。检测约 20-40s，popup 保持打开即可看到结果；
+// 即便中途关掉 popup，后端仍会把 cookie_status 写回库，下次打开刷新列表照样是真实态，结果不丢。
+async function triggerCookieCheck(accountId, badge, detectBtn) {
+    if (!savedApikey) {
+        showMessage('error', '请先填写并保存 apikey');
+        return;
+    }
+    const base = serverUrl.replace(/\/+$/, '');
+    detectBtn.disabled = true;
+    setBadge(badge, 'checking');
+
+    // 1. 发起检测，拿 check_id。
+    let checkId;
+    try {
+        const resp = await fetch(`${base}/api/accounts/${accountId}/cookie-checks`, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${savedApikey}` }
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+            throw new Error(data.error || data.detail || `HTTP ${resp.status}`);
+        }
+        checkId = data.check_id;
+    } catch (e) {
+        setBadge(badge, 'error', '发起失败');
+        detectBtn.disabled = false;
+        showMessage('error', `检测发起失败: ${e.message}`);
+        return;
+    }
+
+    // 2. 轮询到终态或超时。
+    for (let i = 0; i < CHECK_POLL_MAX; i++) {
+        await new Promise(r => setTimeout(r, CHECK_POLL_INTERVAL));
+        let data;
+        try {
+            const resp = await fetch(`${base}/api/cookie-checks/${checkId}`, {
+                headers: { 'Authorization': `Bearer ${savedApikey}` }
+            });
+            data = await resp.json().catch(() => ({}));
+            if (resp.status === 404) {
+                setBadge(badge, 'error', '结果丢失');
+                showMessage('error', '检测结果已丢失（服务重启或过期），请重试');
+                detectBtn.disabled = false;
+                return;
+            }
+            if (!resp.ok) {
+                throw new Error(data.error || data.detail || `HTTP ${resp.status}`);
+            }
+        } catch (e) {
+            setBadge(badge, 'error', '轮询失败');
+            showMessage('error', `检测轮询失败: ${e.message}`);
+            detectBtn.disabled = false;
+            return;
+        }
+
+        const st = data.status;
+        if (st === 'checking') continue;
+
+        // 终态：valid/invalid/captcha/error。
+        detectBtn.disabled = false;
+        if (st === 'error') {
+            // error 是基础设施失败（浏览器起不来/超时），不代表 cookie 失效，不误伤成"失效"。
+            setBadge(badge, 'error', '检测异常');
+            showMessage('info', `检测未完成（非 cookie 失效）: ${data.reason || '基础设施错误'}，可稍后重试`);
+        } else {
+            setBadge(badge, st);
+            const msg = { valid: '该账号 cookie 有效', invalid: '该账号 cookie 已失效，需重新扫码登录', captcha: '被验证码/滑块拦截，需人工过验证' }[st] || `检测完成: ${st}`;
+            showMessage(st === 'valid' ? 'success' : 'info', msg);
+            // 有效时后端可能补全了 nickname/red_id/avatar，刷新列表拉最新信息。
+            if (st === 'valid') loadAccounts();
+        }
+        return;
+    }
+
+    // 超时。
+    setBadge(badge, 'error', '检测超时');
+    detectBtn.disabled = false;
+    showMessage('error', '检测超时（约 60s 未出结果），请重试');
 }
 
 // 点击账号卡片：触发 service worker 开无痕窗注入。聚焦新窗口会关闭 popup，
