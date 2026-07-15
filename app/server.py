@@ -16,6 +16,7 @@ from app.auth.bootstrap import bootstrap_admin
 from app.auth.context import AccessDenied, AuthError
 from app.auth.middleware import ApiKeyMiddleware
 from app.browser.account_locks import account_locks
+from app.browser.browser_reaper import BrowserReaper
 from app.browser.cookie_checker import CookieChecker
 from app.core.config import assert_secret_key_configured, settings
 from app.core.errors import NotFoundError
@@ -51,6 +52,11 @@ def create_app() -> FastAPI:
                 db_module.async_session, settings.COOKIE_CHECK_INTERVAL
             )
             cookie_checker.start()
+        # 可选孤儿 camoufox 回收:仅在配置 >0 时起(周期扫 /proc 杀无主超龄残留防内存泄露)。
+        reaper: BrowserReaper | None = None
+        if settings.BROWSER_REAP_INTERVAL > 0:
+            reaper = BrowserReaper(settings.BROWSER_REAP_INTERVAL)
+            reaper.start()
         try:
             yield
         finally:
@@ -58,6 +64,8 @@ def create_app() -> FastAPI:
             await scheduler.stop()
             if cookie_checker is not None:
                 await cookie_checker.stop()
+            if reaper is not None:
+                await reaper.stop()
 
     # 1.1 薄 MCP facade 的 Streamable HTTP ASGI app(子 app 内路径 "/",挂到父应用 /mcp)。
     #      host_origin_protection=False:关掉 MCP 传输层的 Host/Origin(DNS-rebinding)防护,
