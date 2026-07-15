@@ -1,12 +1,14 @@
 """FastAPI 装配骨架 + /healthz 探活。
 
-纯 REST 装配:路由见 app/http 注册表,自描述见 GET /api/manifest。
+REST 装配:路由见 app/http 注册表,自描述见 GET /api/manifest。
+重挂薄 MCP facade(/mcp,Streamable HTTP,给 claude.ai);业务仍在 REST。
 """
 
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastmcp.utilities.lifespan import combine_lifespans
 from loguru import logger
 
 import app.core.db as db_module
@@ -18,6 +20,7 @@ from app.browser.cookie_checker import CookieChecker
 from app.core.config import assert_secret_key_configured, settings
 from app.core.errors import NotFoundError
 from app.http import ALL_ROUTERS
+from app.mcp_facade import mcp
 from app.publish.runtime import set_active_scheduler
 from app.publish.scheduler import PublishScheduler
 
@@ -56,9 +59,20 @@ def create_app() -> FastAPI:
             if cookie_checker is not None:
                 await cookie_checker.stop()
 
-    app = FastAPI(title="nbdpsy-api", lifespan=app_lifespan)
+    # 1.1 薄 MCP facade 的 Streamable HTTP ASGI app(子 app 内路径 "/",挂到父应用 /mcp)。
+    #      host_origin_protection=False:关掉 MCP 传输层的 Host/Origin(DNS-rebinding)防护,
+    #      否则经反代/隧道进来的公网 Host(如 mcp.nbdpsy.com)会被判 421 Misdirected Request;
+    #      本服务真正的鉴权是 apikey 中间件(每个 /mcp 调用都要 Bearer),该防护在此冗余。
+    #      其 lifespan 必须与父 lifespan 组合(combine_lifespans),否则 MCP session manager 的
+    #      task group 不启动,/mcp 请求会报错。
+    mcp_app = mcp.http_app(path="/", host_origin_protection=False)
 
-    # 2. apikey 鉴权中间件:白名单(/healthz、/downloads)放行,其余(含 /api/*)校验 apikey。
+    app = FastAPI(
+        title="nbdpsy-api",
+        lifespan=combine_lifespans(app_lifespan, mcp_app.lifespan),
+    )
+
+    # 2. apikey 鉴权中间件:白名单(/healthz、/downloads)放行,其余(含 /api/*、/mcp/)校验 apikey。
     app.add_middleware(ApiKeyMiddleware)
 
     # 2.1 app 级异常处理器:把 REST 端点里抛出的鉴权异常转成干净 HTTP,不泄栈成 500。
@@ -109,5 +123,9 @@ def create_app() -> FastAPI:
     #    鉴权由 apikey 中间件按路径白名单统一把关,注册顺序见 app/http/__init__.py。
     for r in ALL_ROUTERS:
         app.include_router(r)
+
+    # 5. 挂载薄 MCP facade 端点(给 claude.ai)。客户端须用 "/mcp/"(带结尾斜杠);
+    #    POST "/mcp"(无斜杠)会 307。鉴权仍由 apikey 中间件把关(/mcp 不在白名单)。
+    app.mount("/mcp", mcp_app)
 
     return app
