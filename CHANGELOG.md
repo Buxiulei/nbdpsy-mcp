@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.6.0 (2026-07-15)
+
+两个功能:发布计划原地修改(定时发布收口)+ chrome 插件交互精简为账号管理器。
+
+- **待发定时任务原地修改**:`PATCH /api/publish-jobs/{job_id}`——**仅 `pending`** 任务可原地改
+  `schedule_time` / `title` / `content` / `images` / `topics`,不必"取消再重建"。定时发布确定用
+  服务端定时(job 压库到点发,可随时改计划),不做小红书原生定时按钮。语义:PATCH 部分更新
+  (`model_fields_set`,省略字段不改);`schedule_time` 显式 `null`=清空转立即发并 submit;
+  条件更新 `WHERE status='pending'` 原子防与调度器 scan 抢占(rowcount=0 返 `{ok:false,status}`,
+  绝不改到正在发的任务);非 pending 返 `{ok:false,status:<当前态>}`;显式 `title/content=null`→400
+  (非 500);`account_id` 不可改。补 manifest 条目,agent/claude.ai/插件均可发现调用。
+- **chrome 插件账号管理器化(v2.1.0)**:插件从"当前标签页 cookie 采集器"精简为"我的账号管理器"。
+  **移除**:同步当前页 cookie、当前标签页状态指示 + 用户信息区、打开小红书普通标签。**保留五条**:
+  录 apikey(唯一必填,server-url 折叠进高级设置默认 mcp.nbdpsy.com)、看归属账号列表、点卡注入
+  cookie 开无痕窗、无痕登录采集 cookies(加/换号)、per-card 验活。所有小红书会话统一走无痕窗。
+  六项权限全保留(webRequest 被无痕采 httpOnly cookie 依赖,不误删)。337 行删减,消息协议双侧一致。
+- **部署**:`systemctl restart nbdpsy-server` 加载 PATCH 端点 + ExecStartPre 重打包插件 zip(供运营
+  下载更新到 2.1.0);**无新迁移**(PATCH 复用 PublishJob 现有字段)。插件更新后运营需 load-unpacked
+  或重新下载 zip 走查。
+
 ## 0.5.0 (2026-07-15)
 
 浏览器并发硬化:补上并发缺口 + 空闲释放防内存泄露,支撑 20+ 运营同时发起浏览器操作。
