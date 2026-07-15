@@ -118,7 +118,7 @@ async function loadAccounts() {
     const key = savedApikey;
     const base = serverUrl.replace(/\/+$/, '');
     if (!base || !key) {
-        renderAccountsEmpty('填好服务器地址与 apikey 后加载账号');
+        renderAccountsEmpty('填好 apikey 并保存后加载账号');
         return;
     }
     renderAccountsEmpty('加载中...');

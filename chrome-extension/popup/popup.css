@@ -162,16 +162,6 @@ body {
   box-shadow: 0 4px 12px rgba(114, 27, 42, 0.4);
 }
 
-.btn-secondary {
-  background: #f8f9fa;
-  color: #333;
-  border: 1px solid #ddd;
-}
-
-.btn-secondary:hover:not(:disabled) {
-  background: #e9ecef;
-}
-
 /* 我的账号区域 */
 .accounts-section {
   margin-bottom: 16px;
