@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.5.0 (2026-07-15)
+
+浏览器并发硬化:补上并发缺口 + 空闲释放防内存泄露,支撑 20+ 运营同时发起浏览器操作。
+此前 publish 有 PublishQueue(2) 硬闸,但 cookie 检测 / 笔记导出 / 周期巡检**无全局闸**——
+20 个运营齐发可能同时起 20 个 camoufox 打爆内存。三块 + 一处收口:
+
+- **全局浏览器并发闸**:`app/browser/browser_gate.py` 进程级信号量 `BROWSER_CONCURRENCY=6`,
+  `browser_slot()` 套住**全部 4 个** camoufox 启动入口(发布 / cookie 检测 / 笔记导出 / 周期巡检)。
+  超出上限的操作排队等名额(不拒绝、不崩),总 camoufox 数恒 ≤6。与 PublishQueue(2) 共存:
+  publish 在闸下最多占 2 名额不自卡。camoufox 瘦身:`block_webgl=True` 恒开、只读操作
+  (cookie 检测 / 导出)`block_images=True`,**发布不 block_images 保发布页渲染保真**。
+- **孤儿 camoufox 周期回收 reaper**:`app/browser/browser_reaper.py` 周期(默认 300s)扫 /proc,
+  杀"账号锁未持有(无在跑操作)+ 存活超 `BROWSER_REAP_AGE=900s`"的残留 camoufox,兜住崩溃/
+  超时打断留下的孤儿进程,防内存泄露。三条件缺一不杀,锁持有的在跑浏览器绝不误杀;复用
+  `profile_guard.browser_profiles_root()` / `iter_camoufox_procs()`,路径约定与 /proc 枚举单一真相源。
+  `BROWSER_REAP_INTERVAL=0` 可关。
+- **SQLite WAL + busy_timeout**:`app/core/db.py` 仅当 DATABASE_URL 是 sqlite 时启用
+  `journal_mode=WAL` + `busy_timeout`(`SQLITE_BUSY_TIMEOUT=30s`),并发写从"database is locked"
+  报错变排队等待。非 sqlite(Postgres)自动跳过,不传 sqlite-only 参数。
+- **周期巡检补账号锁**:`_check_account` 补 `account_locks`,与另三入口锁序一致——让 reaper 视其
+  浏览器"有主"不误杀,并关掉同号巡检 × publish/手动检测之间 pre-existing 的 kill_orphans 互杀窗口。
+- **部署**:走 `systemctl restart nbdpsy-server`(**本特性无新建表 / 无新迁移**,ExecStartPre 的
+  `alembic upgrade head` 为 no-op)。新增可选 `.env` 字段(均有默认值,不配也能跑):
+  `BROWSER_CONCURRENCY` / `BROWSER_REAP_INTERVAL` / `BROWSER_REAP_AGE` / `SQLITE_BUSY_TIMEOUT`。
+
 ## 0.4.0 (2026-07-15)
 
 claude.ai 网页/手机 App 接入:图片上传端点 + 薄 MCP facade。让不能装 Claude Desktop 的运营
