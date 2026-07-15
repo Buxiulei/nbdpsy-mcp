@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     # Cookie 巡检间隔（秒，0 表示关闭）
     COOKIE_CHECK_INTERVAL: int = 0
 
+    # 孤儿 camoufox 回收:巡检间隔(秒，0 表示关闭)与判定超龄阈值(秒)。
+    # 无主(账号锁未持有)且存活超 REAP_AGE 的 camoufox 视作崩溃残留,SIGKILL 回收防内存泄露。
+    BROWSER_REAP_INTERVAL: int = 300
+    BROWSER_REAP_AGE: int = 900
+
     # 调试截图开关
     DEBUG_SCREENSHOTS_ENABLED: bool = False
 
