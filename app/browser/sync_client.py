@@ -35,6 +35,27 @@ from app.browser.profile_guard import (
     sanitize_launch_options,
 )
 
+# ark.xiaohongshu.com 是小红书商家/专业号后端(trade_note/permission、experiment_info
+# 等商品/直播权限门)。发布普通图文根本不需要它,但在 tun 环境下该域被路由到北京、
+# 与会话直连 IP 不匹配 → 稳定返回 401 → XHS 前端全局 401 拦截器无脑跳登录页
+# (login?redirectReason=401),表现为"上传/编辑后掉登录"。抓包实证:图片上传
+# (ros-upload/creator permit)全 200,唯一 401 就是 ark 这些商家权限门;且这些请求
+# 从 Service Worker/隔离上下文发出,Playwright route / window.fetch / XHR patch 均拦不到。
+# 解法:用 Firefox PAC 把 ark.xiaohongshu.com 指向死代理(127.0.0.1:1)→ 连接失败
+# (网络错误,而非 401)→ 前端 401 拦截器不触发,不跳登录;其余域 DIRECT(照旧走 tun)。
+# PAC 是浏览器全局代理层,SW/iframe/主线程一律生效,弥补 route/JS 拦不到的盲区。
+_ARK_BLACKHOLE_PAC = (
+    "function FindProxyForURL(url, host){"
+    'if(host=="ark.xiaohongshu.com"){return "PROXY 127.0.0.1:1";}'
+    'return "DIRECT";}'
+)
+
+
+def _ark_blackhole_pac_url() -> str:
+    import base64
+    b64 = base64.b64encode(_ARK_BLACKHOLE_PAC.encode("utf-8")).decode("ascii")
+    return "data:application/x-ns-proxy-autoconfig;base64," + b64
+
 
 @dataclass
 class PublishResult:
@@ -190,6 +211,12 @@ class SyncClient:
                     "navigator.platform": fp.platform or "Win32",
                 },
                 window=(fp.viewport["width"], fp.viewport["height"]),
+                # PAC 把 ark.xiaohongshu.com 指向死代理 → 商家权限门 401 变网络错误,
+                # 前端不再跳登录(详见模块顶部 _ARK_BLACKHOLE_PAC 注释)。其余 DIRECT。
+                firefox_user_prefs={
+                    "network.proxy.type": 2,  # 2 = 用 PAC
+                    "network.proxy.autoconfig_url": _ark_blackhole_pac_url(),
+                },
             )
             # 持久化参数注入(NewBrowser 通过 from_options 展开传给 launch_persistent_context)
             camoufox_opts["user_data_dir"] = str(pdir)
@@ -205,6 +232,22 @@ class SyncClient:
                 from_options=camoufox_opts,
             )
             logger.info(f"[SyncClient] Camoufox 已启动(账号 {self.account_id})")
+
+            # 吞未捕获错误/未处理拒绝:ark 被 PAC 打到死代理后请求网络错误,XHS 若未 catch
+            # 会冒泡成 pageerror,而 Playwright Firefox driver 处理 location 为空的 pageerror
+            # 时会崩(coreBundle.js 读 pageError.location.url 抛 TypeError → 整个 driver 挂)。
+            # 在文档最早期兜住这些错误,driver 不再收到畸形 pageerror,发布流程不被打断。
+            try:
+                self.context.add_init_script(
+                    "window.addEventListener('unhandledrejection',"
+                    "function(e){try{e.preventDefault();e.stopImmediatePropagation();}catch(_){}}"
+                    ",true);"
+                    "window.addEventListener('error',"
+                    "function(e){try{e.preventDefault();e.stopImmediatePropagation();}catch(_){}}"
+                    ",true);"
+                )
+            except Exception as e:
+                logger.warning(f"[SyncClient] 错误吞噬 init-script 装配失败(忽略): {e}")
 
             if self.context.pages:
                 self.page = self.context.pages[0]
