@@ -43,12 +43,23 @@ _MT_CONCURRENCY = 8
 
 # ── 客户端 / 依赖缝 ──────────────────────────────────────────────────
 
+# 模块级单例客户端（Q-1 审查项）：AsyncOpenAI 内部持一个 httpx.AsyncClient 连接池，长驻
+# worker 里每次调用都新建而不 aclose，会让 keep-alive 连接与 socket FD 无限累积（translate
+# 一条视频可发上千次请求）。故首次调用惰性建一个、后续复用同一实例。测试经
+# ``monkeypatch.setattr(providers, "_shared_client", None)`` 复位即可强制按替身 AsyncOpenAI
+# 重建（见 test_video_providers._install_fake_openai）。
+_shared_client: AsyncOpenAI | None = None
+
+
 def _openai_client() -> AsyncOpenAI:
-    """DashScope openai 兼容异步客户端（翻译/LLM/VL 共用）。"""
-    return AsyncOpenAI(
-        api_key=settings.DASHSCOPE_API_KEY,
-        base_url=settings.DASHSCOPE_BASE_URL,
-    )
+    """DashScope openai 兼容异步客户端（翻译/LLM/VL 共用，模块级单例复用免 FD 泄漏）。"""
+    global _shared_client
+    if _shared_client is None:
+        _shared_client = AsyncOpenAI(
+            api_key=settings.DASHSCOPE_API_KEY,
+            base_url=settings.DASHSCOPE_BASE_URL,
+        )
+    return _shared_client
 
 
 def _load_transcription():

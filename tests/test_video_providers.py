@@ -69,6 +69,10 @@ def _install_fake_openai(monkeypatch, content_fn):
     _FakeAsyncOpenAI.shared_content_fn = staticmethod(content_fn)
     _FakeAsyncOpenAI.last_init_kwargs = None
     monkeypatch.setattr(providers, "AsyncOpenAI", _FakeAsyncOpenAI)
+    # Q-1：_openai_client 现为模块级单例，须复位缓存，令本次调用按新替身重建客户端
+    # （否则复用上一测试缓存的实例，calls/content_fn 绑定的是旧 list）。monkeypatch 于
+    # 测试结束自动还原为 None。
+    monkeypatch.setattr(providers, "_shared_client", None)
     return calls
 
 
