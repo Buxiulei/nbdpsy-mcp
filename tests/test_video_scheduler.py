@@ -13,9 +13,8 @@
 - revision job：派生后前五阶段标 inherited done → first_incomplete=rewrite。
 - enqueue 原语：解 revision 子 job「running+NULL 心跳」死局 → 调度循环从 rewrite 跑到 completed。
 
-视频 job 模型由并行 Track M1（app/models/video_job.py）产出；本文件在测试内建**同构临时模型**
-``VideoTransportJob``（字段/列名与源 models/video_transport.py 一致），并 monkeypatch 调度模块的
-``VideoJob`` 全局。合流以 M1 为准——届时删本临时模型、改 import M1 的真模型即可。
+视频 job 模型直接用真模型 ``app.models.video_job.VideoJob``（调度模块本就 import 它，无需
+monkeypatch）；隔离引擎上只建/删 ``video_jobs`` 这一张表，不落进程内共享 metadata 的其它表。
 """
 
 import asyncio
@@ -24,21 +23,13 @@ from datetime import datetime, timedelta
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import (
-    JSON,
-    Column,
-    DateTime,
-    Integer,
-    String,
-    Text,
-)
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
-from sqlalchemy.orm import DeclarativeBase
 
+from app.models.video_job import VideoJob
 from app.video import scheduler as sched_mod
 from app.video.scheduler import (
     REMAKE_STAGE_ORDER,
@@ -53,63 +44,26 @@ from app.video.scheduler import (
 )
 
 
-# ── 同构临时模型（独立 Base，完全隔离，不污染宿主 app.core.db.Base.metadata）──────────
-class _TempBase(DeclarativeBase):
-    """本测试专用声明式基类，与宿主 Base 分离，避免临时表注册进全局 metadata。"""
-
-
-class VideoTransportJob(_TempBase):
-    """源 models/video_transport.py:VideoTransportJob 的同构副本（M2 独立开发期占位）。"""
-
-    __tablename__ = "video_transport_jobs"
-
-    id = Column(Integer, primary_key=True, index=True)
-    url = Column(String(500), nullable=False)
-    video_id = Column(String(64), index=True)
-    title = Column(String(500))
-    duration_seconds = Column(Integer)
-    mode = Column(String(20), nullable=False, default="transport")
-    parent_job_id = Column(Integer, index=True)
-    status = Column(String(20), default="queued", index=True)
-    stage = Column(String(20), default="download")
-    stages = Column("stages_json", JSON, default=dict)
-    options = Column("options_json", JSON, default=dict)
-    products = Column("products_json", JSON, default=dict)
-    term_sheet = Column("term_sheet_json", JSON, default=list)
-    error = Column(Text)
-    retry_count = Column(Integer, default=0)
-    heartbeat_at = Column(DateTime)
-    created_by = Column(Integer, index=True)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-
-@pytest.fixture(autouse=True)
-def _patch_model(monkeypatch):
-    """把调度模块的 VideoJob 全局指向临时同构模型（job_store 函数族 / 调度器查询据此建/查表）。"""
-    monkeypatch.setattr(sched_mod, "VideoJob", VideoTransportJob)
-
-
 @pytest_asyncio.fixture
 async def vf(tmp_path):
-    """隔离的 async_sessionmaker（仅建临时模型这张表），供调度器多会话操作用。"""
+    """隔离的 async_sessionmaker（隔离引擎上仅建真模型 video_jobs 这一张表），供调度器多会话操作用。"""
     url = f"sqlite+aiosqlite:///{tmp_path}/vt.db"
     engine = create_async_engine(url, future=True)
     async with engine.begin() as conn:
-        await conn.run_sync(_TempBase.metadata.create_all)
+        await conn.run_sync(VideoJob.__table__.create)
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
     try:
         yield factory
     finally:
         async with engine.begin() as conn:
-            await conn.run_sync(_TempBase.metadata.drop_all)
+            await conn.run_sync(VideoJob.__table__.drop)
         await engine.dispose()
 
 
 # ── 建数据 / mock handler 辅助 ─────────────────────────────────────────────
-async def _get(vf, job_id: int) -> VideoTransportJob:
+async def _get(vf, job_id: int) -> VideoJob:
     async with vf() as s:
-        return await s.get(VideoTransportJob, job_id)
+        return await s.get(VideoJob, job_id)
 
 
 def _recorder_handlers(order, recorded: list):
@@ -300,7 +254,7 @@ async def test_recover_stale_resumes_and_touches(vf):
     续跑从 first_incomplete=transcript 起，跑完 completed。"""
     stale_hb = datetime.utcnow() - timedelta(minutes=16)
     async with vf() as s:
-        job = VideoTransportJob(
+        job = VideoJob(
             url="u", mode="transport", status="running",
             stages={"download": {"status": "done", "stats": {"video_path": "/v.mp4"}}},
             heartbeat_at=stale_hb, retry_count=0,
@@ -332,7 +286,7 @@ async def test_recover_stale_skips_in_flight(vf):
     """在途 job（_in_flight）即便心跳超时也不复位（阶段墙钟长不等于僵死）。"""
     stale_hb = datetime.utcnow() - timedelta(minutes=16)
     async with vf() as s:
-        job = VideoTransportJob(url="u", mode="transport", status="running",
+        job = VideoJob(url="u", mode="transport", status="running",
                                 heartbeat_at=stale_hb, retry_count=0)
         s.add(job)
         await s.commit()
@@ -351,7 +305,7 @@ async def test_recover_stale_max_retries_marks_failed(vf):
     """retry_count 已达上限的僵死 job → 直接 failed，不再重排。"""
     stale_hb = datetime.utcnow() - timedelta(minutes=16)
     async with vf() as s:
-        job = VideoTransportJob(url="u", mode="transport", status="running",
+        job = VideoJob(url="u", mode="transport", status="running",
                                 heartbeat_at=stale_hb, retry_count=sched_mod._MAX_RETRIES)
         s.add(job)
         await s.commit()
@@ -373,7 +327,7 @@ async def test_recover_stale_honors_configured_timeout(vf):
     stale_timeout=3600 时判新鲜不动、stale_timeout=1 时判僵死复位。"""
     hb = datetime.utcnow() - timedelta(seconds=5)
     async with vf() as s:
-        job = VideoTransportJob(url="u", mode="transport", status="running",
+        job = VideoJob(url="u", mode="transport", status="running",
                                 heartbeat_at=hb, retry_count=0)
         s.add(job)
         await s.commit()
@@ -396,7 +350,7 @@ async def test_scheduler_loop_recovers_and_processes(vf):
     stale_hb = datetime.utcnow() - timedelta(minutes=16)
     async with vf() as s:
         fresh = await create_job(s, url="fresh", options={}, user_id=1, mode="transport")
-        stale = VideoTransportJob(url="stale", mode="transport", status="running",
+        stale = VideoJob(url="stale", mode="transport", status="running",
                                   heartbeat_at=stale_hb, retry_count=0)
         s.add(stale)
         await s.commit()
@@ -468,7 +422,7 @@ async def test_revision_staging_state_undiscoverable_until_requeued(vf):
 
     # reset_to_queued（端点继承完成后调用）后才放行：可被 scan 发现、心跳已刷
     async with vf() as s:
-        child = await s.get(VideoTransportJob, child_id)
+        child = await s.get(VideoJob, child_id)
         await reset_to_queued(s, child)
     assert child_id in await scheduler.scan_queued()
     row = await _get(vf, child_id)

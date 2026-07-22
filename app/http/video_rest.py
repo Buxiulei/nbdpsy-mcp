@@ -279,7 +279,8 @@ async def retry_video_job(job_id: int) -> dict:
         if not _can_access(job, op):
             raise AccessDenied("无权访问该视频任务")
         if job.status not in ("failed", "completed"):
-            raise HTTPException(409, "job 仍在运行")
+            raise HTTPException(
+                409, "job 仍在运行（若长期无进展且从未被 worker 执行过，可 DELETE 后重发）")
         job.error = None
         resume_stage = scheduler.first_incomplete_stage(job)
         await _requeue(session, job)
@@ -323,9 +324,10 @@ async def revise_video_job(job_id: int, req: ReviseJobRequest) -> dict:
         await scheduler.mark_stages_inherited(
             session, child, _INHERITED_STAGES, parent_id=job.id)
         await _enrich_inherited_stats(session, child, job)  # 补路径 stats，修复继承阶段断链
-        # mark_stages_inherited 已把 child 翻成 running 且心跳 NULL——若复位失败，child 会卡
-        # running 让 recovery 捞不到、retry 双 409 死局。故复位失败即 fail_job（child 落 failed
-        # 可 retry/delete），再抛 500 让调用方知晓。
+        # child 出厂即「running + 心跳 NULL」暂存态（create_revision_job 出厂即此态，C1 修复：防
+        # worker 在继承窗口按 status='queued' 抢跑）——继承已就绪，_requeue 是其转 queued 的唯一
+        # 出口。若复位失败，child 会卡 running 让 recovery 捞不到、retry 双 409 死局。故复位失败即
+        # fail_job（child 落 failed 可 retry/delete），再抛 500 让调用方知晓。
         try:
             await _requeue(session, child)  # 复位 queued → worker 从 rewrite 续跑
         except Exception as exc:

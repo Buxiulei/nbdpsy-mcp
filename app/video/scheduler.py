@@ -461,12 +461,13 @@ class VideoScheduler:
         再 submit 入内部队列（免等下个 scan 周期即被取）。
 
         两处必需：
-        1. **revision 子 job 接线（解死局）**：``create_revision_job`` + ``mark_stages_inherited``
-           后，子 job 因 ``update_stage`` 的「queued→running」被翻成 status='running' 且
-           heartbeat_at 仍为 NULL——此态 ``mark_running``（WHERE status='queued'）占不到、
-           ``recover_stale``（WHERE heartbeat_at<cutoff，SQL 中 NULL 永不命中）也捞不到，成死局。
-           enqueue 复位回 queued + touch 心跳，解锁 mark_running 原子占用，管线从 first_incomplete
-           （=rewrite）续跑。
+        1. **revision 子 job 接线（放行暂存态）**：``create_revision_job`` 出厂即把子 job 置
+           status='running' + heartbeat_at NULL 的**故意暂存态**（C1 修复，见其 docstring：防独立
+           worker 在 inherit_artifacts / mark_stages_inherited 的继承窗口里按 status='queued' 抢跑、
+           全量重跑破坏增量修订）。此态两条 worker 入口都够不着——``mark_running``（WHERE
+           status='queued'）占不到、``recover_stale``（WHERE heartbeat_at<cutoff，SQL 中 NULL 永不
+           命中）也捞不到。继承就绪后 ``enqueue`` / REST ``_requeue`` 是其转 queued 的唯一出口：复位回
+           queued + touch 心跳，解锁 mark_running 原子占用，管线从 first_incomplete（=rewrite）续跑。
         2. **免定时立即发**：置 queued 后直接 submit（宿主 publish.submit 范式），M4 REST 建 job /
            派 revision 后调本原语立即触发，不等下个 poll 周期。
 

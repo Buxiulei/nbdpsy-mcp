@@ -4,8 +4,7 @@
 → 收 SIGTERM/SIGINT 优雅收尾（停调度器 → 退出）。systemd 单元见
 ``deploy/systemd/nbdpsy-video-worker.service``。
 
-并发上限读 Settings.VIDEO_WORKER_CONCURRENCY（Track M1 产出的字段），M2 独立开发期该字段尚不
-存在 → getattr 兜底 1（设计 §1：单机 CPU 编码 1 足够，可调）。
+并发上限读 Settings.VIDEO_WORKER_CONCURRENCY（默认 1；设计 §1：单机 CPU 编码 1 足够，可调）。
 """
 
 import asyncio
@@ -26,11 +25,11 @@ async def main() -> None:
     """建表 → 起调度器 → 等停止信号 → 优雅收尾。"""
     await init_db()
 
-    concurrency = int(getattr(settings, "VIDEO_WORKER_CONCURRENCY", 1) or 1)
-    # 阶段内心跳周期 / 僵死判定阈值从 settings 注入（m2 配置接线，使 DEPLOY.md 里两旋钮为真）；
-    # 缺省与 scheduler 内旧硬编码一致（300s / 900s）。
-    heartbeat_interval = int(getattr(settings, "VIDEO_HEARTBEAT_INTERVAL", 300) or 300)
-    stale_timeout = int(getattr(settings, "VIDEO_STALE_TIMEOUT", 900) or 900)
+    concurrency = int(settings.VIDEO_WORKER_CONCURRENCY or 1)
+    # 阶段内心跳周期 / 僵死判定阈值从 settings 注入（使 DEPLOY.md 里两旋钮为真）；
+    # Settings 缺省（300s / 900s）与 scheduler 内旧硬编码一致，`or` 防显式置 0 落空。
+    heartbeat_interval = int(settings.VIDEO_HEARTBEAT_INTERVAL or 300)
+    stale_timeout = int(settings.VIDEO_STALE_TIMEOUT or 900)
     scheduler = VideoScheduler(
         async_session,
         concurrency=concurrency,
