@@ -44,7 +44,7 @@ API 重启不杀正在跑的长任务（方案 C）。**不需要视频能力可
   `/etc/systemd/system/` → `systemctl daemon-reload` → `systemctl enable --now nbdpsy-video-worker`。
   单元要点：`After=nbdpsy-server.service`（DB/迁移先就绪）、`EnvironmentFile=-/…/.env`（与 API **同源**
   环境：`DATABASE_URL`/`DATA_DIR`/AI 凭据一致，撕裂会让 worker 读错库或缺凭据）、
-  `ExecStart=.venv/bin/python -m app.video.worker`、`Environment=DISPLAY=:99`（still_image 截图用）。
+  `ExecStart=.venv/bin/python -m app.video.worker`；无显示依赖（still_image 截图走 chromium headless）。
 - [ ] **AI 凭据齐**：`.env` 里 `DASHSCOPE_API_KEY`（ASR/翻译/LLM/VL 四能力共用）与
   `DOUBAO_TTS_APPID`/`DOUBAO_TTS_TOKEN`（配音）已填；缺则对应阶段 job 落 failed（error 可见）。
 - [ ] **验活**：`journalctl -u nbdpsy-video-worker -f` 见 `VideoScheduler 已启动（concurrency=1）`；
