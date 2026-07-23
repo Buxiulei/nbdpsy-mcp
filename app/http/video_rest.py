@@ -323,6 +323,9 @@ async def revise_video_job(job_id: int, req: ReviseJobRequest) -> dict:
         # 解析结果随不可变 edit_plan 落库/进 meta（子 rewrite apply 时直接消费，I1 幂等）。
         facts = _load_raw_json(job.id, "scene_facts.json")
         remake_revision.resolve_scene_edit_spans(edit_plan, storyboard, facts)
+        # card_edit.duration_s 溯源（反馈②）：把卡片场景 id 就地解析成 facts 卡片源时间窗 baked
+        # 进 edit_plan，供 relayout 强制卡片目标时长——同样绕开子 job 卡片场景 id 漂移。
+        remake_revision.resolve_card_duration_spans(edit_plan, storyboard, facts)
         child = await scheduler.create_revision_job(
             session, job, instructions=req.instructions, edit_plan=edit_plan)
         inherit_artifacts(job.id, child.id)

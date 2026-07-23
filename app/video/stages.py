@@ -56,15 +56,18 @@ def _load_json(path: str):
 
 
 def _load_param_overrides(job) -> dict:
-    """读 revision rewrite 阶段落盘的参数覆盖（cards/ball/global）；非 revision job 返空结构。
+    """读 revision rewrite 阶段落盘的参数覆盖（cards/ball/global/card_duration_overrides）；
+    非 revision job 返空结构。
 
-    storyboard 消费 cards（场景 content 覆盖）/ ball（球段参数）/ global.sentence_gap；
-    compose 消费 global.disclaimer_text。文件缺失（普通 remake）时给稳定空结构，消费侧零分支。
+    storyboard 消费 cards（场景 content 覆盖）/ ball（球段参数）/ global.sentence_gap /
+    card_duration_overrides（卡片页面停留目标时长，relayout 消费）；compose 消费
+    global.disclaimer_text。文件缺失（普通 remake）时给稳定空结构，消费侧零分支。
     """
     p = paths.raw_dir(job.id) / "param_overrides.json"
     ov = _load_json(p) if p.exists() else {}
     return {"cards": ov.get("cards") or {}, "ball": ov.get("ball") or {},
-            "global": ov.get("global") or {}}
+            "global": ov.get("global") or {},
+            "card_duration_overrides": ov.get("card_duration_overrides") or []}
 
 
 def _apply_card_overrides(sb: dict, cards: dict) -> None:
@@ -327,7 +330,8 @@ async def _handle_storyboard(job, session, ctx):
         period_s=ball.get("period_s"), color_mode=ball.get("color_mode"),
         color_cycle_periods=ball.get("color_cycle_periods"),
         static_source_spans=ball.get("static_source_spans"),
-        sentence_gap=glob.get("sentence_gap"))
+        sentence_gap=glob.get("sentence_gap"),
+        card_duration_overrides=ov.get("card_duration_overrides"))
     _apply_card_overrides(sb, ov["cards"])      # card_edit：覆盖对应卡片场景 content
     # 校验须在 pop 前跑：F-B 栅格不变量靠 retimed_segments 键判弹性模式（见 validate_storyboard），
     # pop 后键消失会漏掉该校验。校验失败即 fail-fast（spec §10）。

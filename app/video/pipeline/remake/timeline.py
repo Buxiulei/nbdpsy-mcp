@@ -65,6 +65,32 @@ def _ceil_ms(t: float) -> float:
     return math.ceil(t * 1000 - 1e-6) / 1000
 
 
+def min_card_duration(speech_durations: list[float]) -> float:
+    """卡片块容纳给定配音时长序列（紧排：首句 LEAD 提前 + 句间 GAP + 尾 TAIL）的最小块时长。
+
+    duration_s 覆盖的下限校验（revision.validate_edit_plan 用它算「卡内台词自然排布最小需要」）
+    与覆盖路径的紧排目标共用一个公式，二者一致：覆盖时 relayout 把功能留白压成 GAP 紧排，末句
+    收尾 speech_end+TAIL 恰 = new_t0 + 本函数值。空序列（纯 no_dub 读卡如「使用须知」）= LEAD+TAIL
+    的裸读卡下限（无配音句，缩到多短都不裁语音）。
+    """
+    if not speech_durations:
+        return _LEAD + _TAIL
+    return _LEAD + sum(speech_durations) + (len(speech_durations) - 1) * _GAP + _TAIL
+
+
+def _match_card_duration(blk_t0: float, blk_t1: float, overrides: list) -> float | None:
+    """卡片块 facts 源区间 [blk_t0,blk_t1] 命中某条 card_duration_override → 返回目标时长 new_dur。
+
+    overrides 为 [[src_t0,src_t1,new_dur],...]（端点 resolve_card_duration_spans 把 card_edit 的
+    scene_id 溯源成 facts 卡片源窗 baked）。facts 全程继承不变，源窗与本 facts 卡片场景 [t0,t1]
+    精确相等（容差 1e-6）→ 抗子 job storyboard 卡片 id 漂移。无覆盖/不命中返 None（行为不变）。
+    """
+    for src_t0, src_t1, new_dur in overrides:
+        if abs(blk_t0 - float(src_t0)) < 1e-6 and abs(blk_t1 - float(src_t1)) < 1e-6:
+            return float(new_dur)
+    return None
+
+
 def _assign_block(orig_start: float, scenes: list[dict]) -> int:
     """句 orig_start 归入哪个 facts 场景下标；越界（不落任何区间）归最近块。"""
     for idx, sc in enumerate(scenes):
@@ -83,7 +109,9 @@ def _assign_block(orig_start: float, scenes: list[dict]) -> int:
 
 
 def relayout(facts_scenes: list[dict], segments: list[dict], durations: list[float],
-             *, fps: int, gap: float | None = None) -> tuple[dict, list[dict], list[str]]:
+             *, fps: int, gap: float | None = None,
+             card_duration_overrides: list | None = None
+             ) -> tuple[dict, list[dict], list[str]]:
     """语音优先重排。
 
     Args:
@@ -109,6 +137,8 @@ def relayout(facts_scenes: list[dict], segments: list[dict], durations: list[flo
     warnings: list[str] = []
     # global_param.sentence_gap 覆盖 card 块句间自然停顿（revision B4）；未给沿用模块默认 _GAP
     card_gap = _GAP if gap is None else float(gap)
+    # card_edit.duration_s 覆盖：命中源窗的卡片块强制目标时长（缩短/延长页面停留），空时行为不变
+    card_overrides = list(card_duration_overrides or [])
     n = len(facts_scenes)
     orig_starts = [seg.get("orig_start", seg["start"]) for seg in segments]
     orig_ends = [seg.get("orig_end", seg["end"]) for seg in segments]
@@ -138,6 +168,9 @@ def relayout(facts_scenes: list[dict], segments: list[dict], durations: list[flo
         blk_t0, blk_t1 = float(sc["t0"]), float(sc["t1"])
         orig_dur = blk_t1 - blk_t0
         seg_ids = block_segs[blk]
+        # duration_s 覆盖只作用卡片块（球块保练习本体时长不改）；无覆盖恒 None → 行为不变
+        card_dur_override = (None if sc.get("kind") == "ball_exercise"
+                             else _match_card_duration(blk_t0, blk_t1, card_overrides))
 
         if sc.get("kind") == "ball_exercise":
             # 练习本体：新时长=原时长；块内句子相对位置锚定，再过全局护栏防重叠
@@ -158,8 +191,13 @@ def relayout(facts_scenes: list[dict], segments: list[dict], durations: list[flo
         elif not seg_ids:
             # 无句子块保持原时长；但空收尾卡（末句全在球段、收尾卡无句）同样套结语 8s
             # 下限（A6/F2），给足读卡 + 淡出——否则短空收尾卡会一闪而过。
-            floor = _MIN_CLOSING_CARD_S if blk == closing_idx else 0.0
-            new_t1 = _quantize(new_t0 + max(floor, orig_dur), fps)
+            if card_dur_override is not None:
+                # duration_s 覆盖：强制目标时长（替换原时长/floor）。纯 no_dub 读卡（如「使用须知」）
+                # 无配音句不裁语音，缩短只是页面停留变短——正是用户诉求。validate 已保 ≥ LEAD+TAIL。
+                new_t1 = _quantize(new_t0 + card_dur_override, fps)
+            else:
+                floor = _MIN_CLOSING_CARD_S if blk == closing_idx else 0.0
+                new_t1 = _quantize(new_t0 + max(floor, orig_dur), fps)
         else:
             # card 块：句子顺排，功能性留白按原间隔保留（护栏对块内句恒等）
             prev_orig_end = None
@@ -168,7 +206,13 @@ def relayout(facts_scenes: list[dict], segments: list[dict], durations: list[flo
                     algo_start = new_t0 + _LEAD
                 else:
                     orig_gap = orig_starts[sid] - prev_orig_end
-                    seg_gap = orig_gap if orig_gap >= _FUNCTIONAL_PAUSE_MIN else card_gap
+                    # duration_s 覆盖：句间紧排（功能留白压成 GAP），令句子恰排进强制目标时长——
+                    # validate 已保 duration_s ≥ min_card_duration(紧排下限) 故绝不裁语音（选「压句窗」
+                    # 而非「截到卡末」：不丢台词、不破 validate，是最简且无损方案）。
+                    if card_dur_override is not None:
+                        seg_gap = card_gap
+                    else:
+                        seg_gap = orig_gap if orig_gap >= _FUNCTIONAL_PAUSE_MIN else card_gap
                     algo_start = speech_end + seg_gap
                 s_start = algo_start if speech_end is None \
                     else max(algo_start, speech_end + _MIN_SPEECH_GAP)
@@ -177,9 +221,12 @@ def relayout(facts_scenes: list[dict], segments: list[dict], durations: list[flo
                 retimed[sid]["start"] = s_start
                 retimed[sid]["end"] = round(s_end, 3)
                 speech_end, prev_orig_end = retimed[sid]["end"], orig_ends[sid]
-            # A6：结语卡块用 8s 下限（给足读卡 + 收束语 + 淡出），其余 card 块用常规 4s 下限
-            floor = _MIN_CLOSING_CARD_S if blk == closing_idx else _MIN_CARD_S
-            new_dur = max(floor, speech_end + _TAIL - new_t0)
+            if card_dur_override is not None:
+                new_dur = card_dur_override         # 强制目标时长（后续场景整体前移）
+            else:
+                # A6：结语卡块用 8s 下限（给足读卡 + 收束语 + 淡出），其余 card 块用常规 4s 下限
+                floor = _MIN_CLOSING_CARD_S if blk == closing_idx else _MIN_CARD_S
+                new_dur = max(floor, speech_end + _TAIL - new_t0)
             new_t1 = _quantize(new_t0 + new_dur, fps)
 
         block_time_map[blk] = (new_t0, new_t1)

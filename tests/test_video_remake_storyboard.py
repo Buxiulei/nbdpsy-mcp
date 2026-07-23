@@ -846,7 +846,8 @@ class TestRevisionOverrides:
         storyboard.validate_storyboard(sb)
 
     async def test_new_overrides_absent_output_identical_to_baseline(self):
-        # 保真红线：不带 color_cycle_periods / static_source_spans（None/空）时输出与基线逐字节一致
+        # 保真红线：不带 color_cycle_periods / static_source_spans / card_duration_overrides
+        # （None/空）时输出与基线逐字节一致
         facts = self._motion_facts()
         segs = [{"start": 1.0, "end": 3.0, "en": "a", "zh": "引言"}]
         with patch.object(storyboard, "_chat_localize", AsyncMock(return_value={})):
@@ -855,7 +856,8 @@ class TestRevisionOverrides:
         with patch.object(storyboard, "_chat_localize", AsyncMock(return_value={})):
             same = await storyboard.build_storyboard(
                 facts, duration=26.0, segments=segs, clip_durations=[2.0],
-                color_cycle_periods=None, static_source_spans=[])
+                color_cycle_periods=None, static_source_spans=[],
+                card_duration_overrides=[])
         assert base == same
 
     @pytest.mark.asyncio
@@ -874,3 +876,128 @@ class TestRevisionOverrides:
                                               segments=segs, clip_durations=[2.0],
                                               sentence_gap=0.42)
         assert captured["gap"] == 0.42
+
+
+class TestSplitMotionGuardrail:
+    """color_cycle_periods 切分的最小子场景护栏（job3 碎片病灶根治）。
+
+    切分产物（真发生切分，len>1）绝不短于半个轮色周期（0.5·span）；整段本就短于一个周期
+    （carve 短片）则原样透传单段——不由切分制造 1~14 帧的颜色闪片。
+    """
+    SPAN = 2.4857142857142853               # job3 实测 global_period
+
+    def test_short_piece_below_span_not_split(self):
+        # job3 场景6/7 病灶：0.108s 的 carve 短片跨栅格点 → 旧实现切成 0.083+0.025 两碎片。
+        # 整段 < span → 护栏不切，原样透传（避免把 carve 短片再劈成亚帧碎片）。
+        res = storyboard._split_motion_by_periods(
+            261.0, 261.108, run_ref=6.0, span=self.SPAN)
+        assert res == [(261.0, 261.108)]
+
+    def test_tail_remainder_merged_into_previous(self):
+        # 整段 ≥ span、尾部余量 < 0.5·span → 并入前一子段（沿用前段颜色），不独立成碎片
+        res = storyboard._split_motion_by_periods(0.0, 2.1, run_ref=0.0, span=2.0)
+        assert res == [(0.0, 2.1)]          # 旧实现会切 [0,2]+[2,2.1]（尾 0.1s 碎片）
+
+    def test_head_remainder_merged_into_next(self):
+        # 头部余量 < 0.5·span → 并入后一子段；中段满周期保留，产物均 ≥ 0.5·span
+        res = storyboard._split_motion_by_periods(1.9, 6.5, run_ref=0.0, span=2.0)
+        assert res == [(1.9, 4.0), (4.0, 6.5)]        # 头 [1.9,2.0]=0.1 并入首段
+        assert all(b - a >= 1.0 - 1e-9 for a, b in res)
+
+    def test_exact_divisor_run_splits_evenly_no_merge(self):
+        # 整段恰为周期整数倍（保真基线）：逐周期均切，无头尾余量、无归并，行为不变
+        res = storyboard._split_motion_by_periods(4.0, 34.0, run_ref=4.0, span=1.5)
+        assert len(res) == 20
+        assert all(abs((b - a) - 1.5) < 1e-9 for a, b in res)
+
+    def test_span_non_positive_returns_single(self):
+        assert storyboard._split_motion_by_periods(0.0, 5.0, run_ref=0.0, span=0.0) \
+            == [(0.0, 5.0)]
+
+    def test_fuzz_split_products_never_below_half(self):
+        # 属性护栏：切分产物（len>1）恒 ≥ 0.5·span，且铺满/衔接不破
+        import random
+        span, half = self.SPAN, 0.5 * self.SPAN
+        random.seed(7)
+        for _ in range(20000):
+            m0 = random.uniform(0.0, 10.0)
+            m1 = m0 + random.uniform(0.01, 6 * span)
+            res = storyboard._split_motion_by_periods(m0, m1, run_ref=0.37, span=span)
+            assert abs(res[0][0] - m0) < 1e-9 and abs(res[-1][1] - m1) < 1e-6   # 铺满
+            for k in range(len(res) - 1):
+                assert abs(res[k][1] - res[k + 1][0]) < 1e-12                    # 衔接
+            if len(res) > 1:
+                assert all((b - a) >= half - 1e-9 for a, b in res)              # 无碎片
+
+    @pytest.mark.asyncio
+    async def test_color_cycle_periods_no_fragment_scenes(self):
+        # job3 碎片病灶等价构造：多个长运动 facts 段（各 ≈3 周期）+ 漂移时长，令段边界脱离 N·T
+        # 栅格。旧实现头尾余量残成 <0.5·T 碎片（1~14 帧色闪，实测 2 处 0.1/0.2s）；护栏后所有
+        # 运动切分子场景 ≥ 0.5·T。非弹性模式（无 segments）→ 无语音 carve，运动段全是切分产物。
+        scenes = [{"t0": 0.0, "t1": 6.0, "kind": "title_card", "text": "intro"}]
+        t = 6.0
+        for dur in (7.3, 7.7, 7.4, 7.6, 7.35):      # 各 ≈3×2.5，漂移使段边界不落 2.5 栅格
+            scenes.append({"t0": t, "t1": t + dur, "kind": "ball_exercise",
+                           "ball_color_hex": "#FFFFFF", "period_s": 2.5,
+                           "period_estimated": True})
+            t += dur
+        facts = {"scenes": scenes, "warnings": []}
+        with patch.object(storyboard, "_chat_localize", AsyncMock(return_value={})):
+            sb = await storyboard.build_storyboard(facts, duration=t, color_cycle_periods=1)
+        period = next(s["params"]["period_s"] for s in sb["scenes"]
+                      if s["type"] == "ball_exercise")
+        half = period / 2.0
+        motion = [s for s in sb["scenes"]
+                  if s["type"] == "ball_exercise" and not s["params"].get("static")]
+        assert len(motion) > 5                       # 确有切分发生（长段被切多子场景）
+        for m in motion:
+            assert m["t1"] - m["t0"] >= half - 1e-9, \
+                f"运动切分子场景 [{m['t0']},{m['t1']}] 短于 0.5·T={half}（碎片闪片）"
+        for a, b in zip(sb["scenes"], sb["scenes"][1:]):     # 铺满/衔接不破
+            assert a["t1"] == pytest.approx(b["t0"], abs=1e-9)
+        storyboard.validate_storyboard(sb)
+
+
+class TestCardDurationOverride:
+    """card_edit.duration_s → build_storyboard(card_duration_overrides) 缩短卡片页面停留（反馈②）。"""
+
+    @pytest.mark.asyncio
+    async def test_shortens_no_speech_card_and_shifts_scenes(self):
+        # 复刻「使用须知」病灶：无配音卡时长=facts 源区间(20s)，覆盖 duration_s 缩到 8s，后续前移
+        facts = {"scenes": [
+            {"t0": 0.0, "t1": 20.0, "kind": "text_card",
+             "text": "This is not a substitute for medical advice. liability."},
+            {"t0": 20.0, "t1": 40.0, "kind": "ball_exercise",
+             "ball_color_hex": "#FFFFFF", "period_s": 1.5, "period_estimated": True},
+        ], "warnings": []}
+        segs = [{"start": 25.0, "end": 27.0, "en": "q", "zh": "现在有什么感觉",
+                 "orig_start": 25.0, "orig_end": 27.0}]        # 落 ball 块，卡片无句
+        with patch.object(storyboard, "_chat_localize", AsyncMock(return_value={})):
+            base = await storyboard.build_storyboard(
+                facts, duration=40.0, segments=segs, clip_durations=[2.0])
+            short = await storyboard.build_storyboard(
+                facts, duration=40.0, segments=segs, clip_durations=[2.0],
+                card_duration_overrides=[[0.0, 20.0, 8.0]])
+        assert base["scenes"][0]["t1"] == pytest.approx(20.0)          # 基线：须知卡=源区间 20s
+        assert short["scenes"][0]["t0"] == 0.0
+        assert short["scenes"][0]["t1"] == pytest.approx(8.0)          # 覆盖：缩到 8s
+        ball = [s for s in short["scenes"] if s["type"] == "ball_exercise"]
+        assert ball[0]["t0"] == pytest.approx(8.0)                     # 球段整体前移 12s
+        storyboard.validate_storyboard(short)
+
+    @pytest.mark.asyncio
+    async def test_no_override_identical_to_baseline(self):
+        facts = {"scenes": [
+            {"t0": 0.0, "t1": 20.0, "kind": "text_card", "text": "intro"},
+            {"t0": 20.0, "t1": 40.0, "kind": "ball_exercise",
+             "ball_color_hex": "#FFFFFF", "period_s": 1.5, "period_estimated": True},
+        ], "warnings": []}
+        segs = [{"start": 25.0, "end": 27.0, "en": "q", "zh": "甲",
+                 "orig_start": 25.0, "orig_end": 27.0}]
+        with patch.object(storyboard, "_chat_localize", AsyncMock(return_value={})):
+            base = await storyboard.build_storyboard(
+                facts, duration=40.0, segments=segs, clip_durations=[2.0])
+            same = await storyboard.build_storyboard(
+                facts, duration=40.0, segments=segs, clip_durations=[2.0],
+                card_duration_overrides=[])
+        assert base == same

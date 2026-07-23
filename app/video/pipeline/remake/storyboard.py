@@ -63,8 +63,18 @@ def _split_motion_by_periods(m0: float, m1: float, *, run_ref: float,
     （铺满/衔接不破）。span<=0 或无内部切点 → 原样返回单段。切点均 motion↔motion——全局相位公式
     sin(2π(t+t0)/T) 保证球位在切点连续（渲染层零改动），且不触发 F-B 栅格不变量（只管 motion↔static）。
     整周期倍数（N·T）切分令切点恰在球回到同一相位处，视觉上「每晃一组换色」自然。
+
+    最小子场景护栏（job3 碎片病灶根治）：facts 相位边界/carve 语音窗切出的运动子段起止极少
+    恰落 N·T 栅格，其头/尾余量常残成 1~14 帧的独立子场景——每片一个颜色，肉眼是闪烁。护栏保证
+    「切分产物绝不短于半个轮色周期（0.5·span）」：
+      ① 整段本就短于一个轮色周期（m1-m0 < span）→ 不切（一切必产 <0.5·span 碎片；单段透传是
+         carve 的短片本身，非切分制造的碎片）。
+      ② 头/尾栅格余量 < 0.5·span 时并入相邻满周期子段：尾片并入前一子段（沿用前段颜色，符合
+         「尾巴融进上一晃」的直觉）、头片并入后一子段。整段 ≥ span 时中间子段恒 = span，仅头尾
+         两端可能短，各归并一次后每段必 ≥ 0.5·span（唯一内部切点时头尾之和 ≥ span，至多一侧短）。
+    只删内部切点、不移动 m0/m1，铺满/衔接不变量天然维持。
     """
-    if span <= 0:
+    if span <= 0 or (m1 - m0) < span:           # ① 整段短于一个轮色周期：不切，原样透传
         return [(m0, m1)]
     pts: list[float] = []
     k = math.ceil((m0 - run_ref) / span - 1e-9)
@@ -76,6 +86,12 @@ def _split_motion_by_periods(m0: float, m1: float, *, run_ref: float,
             pts.append(p)
         k += 1
     bounds = [m0] + pts + [m1]
+    # ② 头/尾短余量并入相邻满周期子段（先尾后头；各判 len>2 防把整段并没）
+    half = 0.5 * span
+    if len(bounds) > 2 and bounds[-1] - bounds[-2] < half:   # 尾片并入前一子段（沿用前段颜色）
+        del bounds[-2]
+    if len(bounds) > 2 and bounds[1] - bounds[0] < half:     # 头片并入后一子段
+        del bounds[1]
     return [(bounds[idx], bounds[idx + 1]) for idx in range(len(bounds) - 1)]
 
 
@@ -353,7 +369,8 @@ async def build_storyboard(facts: dict, *, duration: float,
                            color_mode: str | None = None,
                            color_cycle_periods: int | None = None,
                            static_source_spans: list | None = None,
-                           sentence_gap: float | None = None) -> dict:
+                           sentence_gap: float | None = None,
+                           card_duration_overrides: list | None = None) -> dict:
     """原片事实 → nbdpsy_v1 分镜脚本。
 
     revision 参数覆盖（B4，均 None 时行为不变，显式传参不 monkeypatch 全局常量）：
@@ -366,6 +383,9 @@ async def build_storyboard(facts: dict, *, duration: float,
     + 顺延跳槽语义，用户「每晃一组变色」= N=1）——切点 motion↔motion、全局相位保证球位连续、渲染零改动；
     static_source_spans=[[s0,s1],...] 把源区间命中的运动球段强制转静止（米白居中、无提示音、栅格吸附
     终校照走——与既有静止段语义一字不差），供 scene_edit（把孤立摆动球段停成静止）落地。
+    card_duration_overrides=[[src_t0,src_t1,new_dur],...] 把源区间命中的卡片场景目标时长强制成
+    new_dur（缩短/延长页面停留），后续场景整体前移、全局顺序护栏 + 栅格终校照走——供 card_edit
+    的 duration_s 落地（弹性时间轴 relayout 消费；非弹性模式无 relayout，该覆盖不生效）。
 
     球段（wave2 + A4）：连续微段按「运动 run / 静止 run」聚合（run 仅判运动/静止与保时长）。
     运动 run 用全片统一中位周期，颜色恢复 per 相位粒度——每相位按相位序循环取 BALL_PALETTE
@@ -391,7 +411,8 @@ async def build_storyboard(facts: dict, *, duration: float,
     new_total = None
     if segments is not None and clip_durations is not None:
         block_time_map, retimed, tl_warnings = timeline.relayout(
-            src_scenes, segments, clip_durations, fps=style.FPS, gap=sentence_gap)
+            src_scenes, segments, clip_durations, fps=style.FPS, gap=sentence_gap,
+            card_duration_overrides=card_duration_overrides)
         warnings.extend(tl_warnings)
         intervals = block_time_map
         new_total = block_time_map[len(src_scenes) - 1][1] if src_scenes else 0.0

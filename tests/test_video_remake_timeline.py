@@ -8,6 +8,7 @@ from app.video.pipeline.remake.timeline import (
     relayout, _assign_block, _LEAD, _GAP, _TAIL, _FUNCTIONAL_PAUSE_MIN, _MIN_CARD_S,
     _MIN_SPEECH_GAP, carve_motion_for_speech, _MIN_STATIC_S, _SPEECH_WINDOW_TAIL,
     _MIN_CLOSING_CARD_S, _closing_card_idx, _snap_static_window, phase_floor, phase_ceil,
+    min_card_duration, _match_card_duration,
 )
 
 pytestmark = pytest.mark.unit
@@ -412,3 +413,51 @@ class TestNoDubSkipsTimeline:
         assert retimed[2]["start"] == retimed[1]["end"] + _GAP
         # 块尾按末正常句算，不含 no_dub 的 5s
         assert btm[0][1] == pytest.approx(retimed[2]["end"] + _TAIL, abs=1e-6)
+
+
+class TestCardDurationOverride:
+    """card_edit.duration_s → relayout(card_duration_overrides) 强制卡片页面停留时长（反馈②）。"""
+
+    def test_min_card_duration_empty_is_lead_plus_tail(self):
+        assert min_card_duration([]) == _LEAD + _TAIL         # 纯读卡（无配音句）下限
+
+    def test_min_card_duration_with_speech(self):
+        # LEAD + Σ时长 + (k-1)·GAP + TAIL
+        assert min_card_duration([2.0, 3.0]) == _LEAD + 5.0 + _GAP + _TAIL
+
+    def test_match_returns_none_when_no_hit(self):
+        assert _match_card_duration(0.0, 20.0, []) is None
+        assert _match_card_duration(0.0, 20.0, [[0.0, 19.0, 8.0]]) is None
+        assert _match_card_duration(0.0, 20.0, [[0.0, 20.0, 8.0]]) == 8.0
+
+    def test_no_speech_card_forced_to_duration(self):
+        # 无配音卡（如「使用须知」）时长本 = 源区间 20s；覆盖强制 8s，后续球段整体前移
+        scenes = [_card(0, 20), _ball(20, 40)]
+        segs = [_seg(25, 27, orig_start=25, orig_end=27)]     # 落 ball 块，卡片无句
+        btm0, _, _ = relayout(scenes, segs, [2.0], fps=FPS)
+        assert btm0[0] == (0.0, 20.0)                         # 基线：卡片=源区间 20s
+        btm, _, _ = relayout(scenes, segs, [2.0], fps=FPS,
+                             card_duration_overrides=[[0.0, 20.0, 8.0]])
+        assert btm[0] == (0.0, 8.0)                           # 覆盖：强制 8s
+        assert btm[1] == (8.0, 28.0)                          # 球段保 20s 时长、整体前移
+
+    def test_speech_card_forced_duration_compresses_functional_pause(self):
+        # card 有两句、原片间隔 12s（功能留白）；覆盖 duration_s → 句间紧排（GAP），卡片缩短
+        scenes = [_card(0, 40)]
+        segs = [_seg(1, 3, orig_start=1, orig_end=3),
+                _seg(15, 17, orig_start=15, orig_end=17)]
+        durs = [1.0, 1.0]
+        btm0, _, _ = relayout(scenes, segs, durs, fps=FPS)    # 基线：保留 12s 功能留白 → 很长
+        btm, retimed, _ = relayout(scenes, segs, durs, fps=FPS,
+                                   card_duration_overrides=[[0.0, 40.0, 8.0]])
+        assert btm[0] == (0.0, 8.0)                           # 强制 8s
+        assert retimed[1]["start"] == retimed[0]["end"] + _GAP  # 句间压成 GAP（非原片 12s）
+        assert btm0[0][1] > btm[0][1]                         # 基线（留功能留白）明显更长
+
+    def test_no_override_identical_to_baseline(self):
+        scenes = [_card(0, 20), _ball(20, 40)]
+        segs = [_seg(25, 27, orig_start=25, orig_end=27)]
+        a = relayout(scenes, segs, [2.0], fps=FPS)
+        b = relayout(scenes, segs, [2.0], fps=FPS, card_duration_overrides=None)
+        c = relayout(scenes, segs, [2.0], fps=FPS, card_duration_overrides=[])
+        assert a == b == c

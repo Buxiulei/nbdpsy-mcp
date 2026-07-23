@@ -108,6 +108,20 @@ class TestParseInstructions:
         assert ops == arr
 
     @pytest.mark.asyncio
+    async def test_parse_card_edit_duration_s(self):
+        # 反馈②：改卡片页面停留时长
+        arr = [{"type": "card_edit", "scene_id": 3, "duration_s": 8.0}]
+        ops, _ = await _parse(json.dumps(arr, ensure_ascii=False))
+        assert ops == arr
+
+    @pytest.mark.asyncio
+    async def test_parse_prompt_mentions_card_duration(self):
+        _, fake = await _parse(
+            json.dumps([{"type": "card_edit", "scene_id": 3, "duration_s": 8}]))
+        prompt = fake.call_args.kwargs["messages"][0]["content"]
+        assert "duration_s" in prompt              # schema 提及卡片时长键，LLM 才能命中「停留太长」
+
+    @pytest.mark.asyncio
     async def test_parse_mixed_multi_op(self):
         arr = [
             {"type": "script_edit", "index": 0, "new_text": "欢迎。"},
@@ -221,9 +235,40 @@ class TestValidateEditPlan:
         assert "卡片" in ei.value.detail
 
     def test_validate_card_edit_needs_title_or_body(self):
-        with pytest.raises(EditPlanError):
+        with pytest.raises(EditPlanError) as ei:
             revision.validate_edit_plan(
                 [{"type": "card_edit", "scene_id": 1}], REWRITTEN, STORYBOARD)
+        assert "duration_s" in ei.value.detail    # title/body/duration_s 三者至少一个
+
+    # ---- 反馈②：card_edit.duration_s（改卡片页面停留时长）校验边界 ----
+
+    def test_validate_card_edit_duration_ok(self):
+        # scene 3 [15,20] 无配音句 → 下限=LEAD+TAIL=2.0，给 8.0 合法
+        assert revision.validate_edit_plan(
+            [{"type": "card_edit", "scene_id": 3, "duration_s": 8.0}],
+            REWRITTEN, STORYBOARD) is None
+
+    def test_validate_card_edit_duration_only_no_title_body_ok(self):
+        # 只给 duration_s（不改文案）合法
+        assert revision.validate_edit_plan(
+            [{"type": "card_edit", "scene_id": 3, "duration_s": 5.0}],
+            REWRITTEN, STORYBOARD) is None
+
+    def test_validate_card_edit_duration_too_short_reports_min(self):
+        # scene 1 [0,5] 含两句配音（3.0/4.0s）→ 紧排下限=0.5+7+1.0+1.5=10.0；给 3.0 → fail 报最小值
+        with pytest.raises(EditPlanError) as ei:
+            revision.validate_edit_plan(
+                [{"type": "card_edit", "scene_id": 1, "duration_s": 3.0}],
+                REWRITTEN, STORYBOARD)
+        assert "至少" in ei.value.detail and "10.0" in ei.value.detail
+
+    def test_validate_card_edit_duration_non_positive(self):
+        for bad in (0, -5, "8", True):
+            with pytest.raises(EditPlanError) as ei:
+                revision.validate_edit_plan(
+                    [{"type": "card_edit", "scene_id": 3, "duration_s": bad}],
+                    REWRITTEN, STORYBOARD)
+            assert "正数" in ei.value.detail
 
     def test_validate_ball_style_unknown_key(self):
         with pytest.raises(EditPlanError) as ei:
@@ -417,6 +462,34 @@ class TestApplyEdits:
         _, ov = revision.apply_edits(ops, REWRITTEN, param_overrides={})
         assert ov["ball"] == {"color_cycle_periods": 1}
 
+    def test_apply_card_edit_duration_writes_override(self):
+        # 端点 resolve 已 baked duration_source_span；apply 累积进 card_duration_overrides
+        ops = [{"type": "card_edit", "scene_id": 3, "duration_s": 8.0,
+                "duration_source_span": [20.0, 24.0]}]
+        _, ov = revision.apply_edits(ops, REWRITTEN, param_overrides={})
+        assert ov["card_duration_overrides"] == [[20.0, 24.0, 8.0]]
+        assert "3" not in ov["cards"]              # 纯 duration_s 不留空 content 条目
+
+    def test_apply_card_edit_title_and_duration_both(self):
+        ops = [{"type": "card_edit", "scene_id": 3, "title": "收尾", "duration_s": 8.0,
+                "duration_source_span": [20.0, 24.0]}]
+        _, ov = revision.apply_edits(ops, REWRITTEN, param_overrides={})
+        assert ov["cards"]["3"] == {"title": "收尾"}
+        assert ov["card_duration_overrides"] == [[20.0, 24.0, 8.0]]
+
+    def test_apply_card_edit_duration_without_baked_span_noop(self):
+        # 未 baked（理论上端点必 baked，防御）→ 不写 card_duration_overrides
+        ops = [{"type": "card_edit", "scene_id": 3, "duration_s": 8.0}]
+        _, ov = revision.apply_edits(ops, REWRITTEN, param_overrides={})
+        assert "card_duration_overrides" not in ov
+
+    def test_apply_no_card_duration_key_when_absent(self):
+        # 无 duration_s 覆盖 → overrides 不含该键（结构不变）
+        _, ov = revision.apply_edits(
+            [{"type": "card_edit", "scene_id": 3, "title": "x"}], REWRITTEN,
+            param_overrides={})
+        assert "card_duration_overrides" not in ov
+
     def test_apply_global_param_writes_overrides(self):
         ops = [{"type": "global_param", "closing_line": "好，练习结束。"}]
         _, ov = revision.apply_edits(ops, REWRITTEN, param_overrides={})
@@ -562,3 +635,64 @@ class TestResolveSceneEditSpans:
         revision.resolve_scene_edit_spans(ops, storyboard, facts)
         assert ops[0]["static_source_spans"] == [[10.0, 20.0]]           # 41-17=24, 51-17=34
         assert ops[1]["static_source_spans"] == [[24.0, 34.0]]
+
+
+# ---------- 反馈②：resolve_card_duration_spans（卡片 scene_id → facts 卡片源时间窗溯源） ----------
+
+class TestResolveCardDurationSpans:
+    """把带 duration_s 的 card_edit 场景 id 溯源成 facts 卡片源时间窗，抗子 job 卡片 id 漂移。
+
+    卡片场景与 facts 非球场景 1:1 顺序对应（build_storyboard 对每个非球 facts 场景恰出一个
+    still_image），据序反查父分镜卡片 id → facts 卡片 [t0,t1]。
+    """
+
+    def _case(self):
+        # facts：卡片[0,10] / 球段[10,20] / 卡片[20,24]；分镜卡片被重排拉长（源窗才是稳定锚）
+        facts = {"scenes": [
+            {"t0": 0.0, "t1": 10.0, "kind": "title_card", "text": "intro"},
+            {"t0": 10.0, "t1": 20.0, "kind": "ball_exercise",
+             "ball_color_hex": "#FFFFFF", "period_s": 1.5},
+            {"t0": 20.0, "t1": 24.0, "kind": "text_card", "text": "end"},
+        ]}
+        storyboard = {"scenes": [
+            {"id": 1, "t0": 0.0, "t1": 25.0, "type": "title_card",
+             "renderer": "still_image", "content": {}},
+            {"id": 2, "t0": 25.0, "t1": 35.0, "type": "ball_exercise",
+             "renderer": "programmatic", "params": {"period_s": 1.5, "static": False}},
+            {"id": 3, "t0": 35.0, "t1": 41.0, "type": "text_card",
+             "renderer": "still_image", "content": {}},
+        ]}
+        return facts, storyboard
+
+    def test_resolve_maps_card_id_to_facts_window(self):
+        facts, storyboard = self._case()
+        ops = [{"type": "card_edit", "scene_id": 3, "duration_s": 8.0}]
+        revision.resolve_card_duration_spans(ops, storyboard, facts)
+        assert ops[0]["duration_source_span"] == [20.0, 24.0]        # 分镜卡片3 ↔ facts 卡片[20,24]
+
+    def test_resolve_first_card(self):
+        facts, storyboard = self._case()
+        ops = [{"type": "card_edit", "scene_id": 1, "duration_s": 8.0}]
+        revision.resolve_card_duration_spans(ops, storyboard, facts)
+        assert ops[0]["duration_source_span"] == [0.0, 10.0]
+
+    def test_resolve_skips_card_edit_without_duration(self):
+        facts, storyboard = self._case()
+        ops = [{"type": "card_edit", "scene_id": 3, "title": "x"}]
+        revision.resolve_card_duration_spans(ops, storyboard, facts)
+        assert "duration_source_span" not in ops[0]                  # 无 duration_s 不溯源
+
+    def test_resolve_leaves_other_ops_untouched(self):
+        facts, storyboard = self._case()
+        ops = [{"type": "scene_edit", "scene_id": 2, "static": True},
+               {"type": "card_edit", "scene_id": 3, "duration_s": 8.0}]
+        revision.resolve_card_duration_spans(ops, storyboard, facts)
+        assert "duration_source_span" not in ops[0]                  # scene_edit 不动
+        assert ops[1]["duration_source_span"] == [20.0, 24.0]
+
+    def test_resolve_identity_when_no_facts(self):
+        # facts 缺失（理论上不发生）→ 退化用分镜卡片自身区间
+        _, storyboard = self._case()
+        ops = [{"type": "card_edit", "scene_id": 3, "duration_s": 8.0}]
+        revision.resolve_card_duration_spans(ops, storyboard, None)
+        assert ops[0]["duration_source_span"] == [35.0, 41.0]
