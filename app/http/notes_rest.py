@@ -63,9 +63,11 @@ MANIFEST_ENTRIES = [
         "summary": "轮询笔记删除结果",
         "admin_only": False, "params": {"deletion_id": "path,str"},
         "returns": "{status, deleted?, remaining?, reason?}",
-        "errors": "403=无该号授权;404=deletion_id 不存在或已过期",
-        "notes": "status 三态:running/done(deleted=实际删除数,remaining=剩余同题卡数)/"
-                 "error(reason 如 note_not_found/need_manual_login)。进程级内存台账,重启即丢。",
+        "errors": "403=无该号授权;404=deletion_id 不存在",
+        "notes": "status 四态:running/done(deleted=实际删除数,remaining=剩余同题卡数)/"
+                 "error(reason 如 note_not_found/need_manual_login)/unknown(server 重启"
+                 "打断了删除,结果未知,按 reason 指引人工核对)。台账已持久化:重启后终态"
+                 "仍可查,不再 404。",
     },
     {
         "method": "GET", "path": "/api/accounts/{account_id}/notes",
@@ -127,8 +129,14 @@ async def start_note_deletion_endpoint(
 
 @router.get("/api/note-deletions/{deletion_id}")
 async def get_note_deletion_endpoint(deletion_id: str) -> dict:
-    """轮询删除结果:running / done(deleted+remaining)/ error(reason);越权 403。"""
+    """轮询删除结果:running / done(deleted+remaining)/ error / unknown;越权 403。
+
+    先查内存台账(热路径);miss 再回退 DB 持久台账——server 重启后终态仍可查,
+    重启打断的 running 行译成 unknown(删除不可逆,绝不冒充还在跑)。
+    """
     entry = note_delete.get_delete(deletion_id)
+    if entry is None:
+        entry = await note_delete.get_delete_persisted(deletion_id)
     if entry is None:
         raise NotFoundError(f"deletion_id {deletion_id} 不存在或已过期")
     operator = current_operator()

@@ -9,6 +9,7 @@
 平移自 app/tools/extension.py 的 get_extension_download 工具(常量 + 逻辑原样搬)。
 """
 
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -18,6 +19,24 @@ from app import __version__
 from app.core.config import settings
 
 router = APIRouter()
+
+# 插件 manifest.json 路径:extension_version 的单一事实源(与打进 zip 的是同一份)。
+_MANIFEST_PATH = Path(__file__).resolve().parent.parent.parent / (
+    "chrome-extension/manifest.json"
+)
+
+
+def _read_extension_version() -> str:
+    """从 chrome-extension/manifest.json 读插件真实版本(如 2.1.2)。
+
+    历史混淆:本端点的 ``version`` 字段是 **server 版本**(app.__version__,v0.6.x),
+    不是插件版本——排障判断"运营装的插件是否旧版"必须比对插件版本。读不到时返回
+    "unknown"(不抛错,不因插件目录缺失拖垮登录闭环起点)。
+    """
+    try:
+        return str(json.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))["version"])
+    except Exception:
+        return "unknown"
 
 # apikey 引导语:不回传明文(库内只存 hash),引导操作者复用连接本服务的同一把 key。
 _APIKEY_HINT = (
@@ -39,10 +58,12 @@ MANIFEST_ENTRIES = [{
     "method": "GET", "path": "/api/extension",
     "summary": "返回 chrome 插件包下载地址、版本、安装步骤、apikey 引导语与服务端当前时间",
     "admin_only": False, "params": {},
-    "returns": "{download_url, version, apikey_hint, install_steps, server_time}",
+    "returns": "{download_url, version, extension_version, apikey_hint, install_steps, server_time}",
     "errors": "",
     "notes": "登录闭环起点:记下 server_time 作为 /api/login/poll 的 since 起点;"
-             "download_url 免鉴权可直接递给操作者。",
+             "download_url 免鉴权可直接递给操作者。注意:version=服务端版本(v0.6.x),"
+             "extension_version=插件真实版本(如 2.1.2)——判断运营插件是否旧版看后者,"
+             "与 chrome://extensions 页面显示的版本号比对。",
 }]
 
 
@@ -61,7 +82,8 @@ async def get_extension_endpoint() -> dict:
     buster = int(zip_path.stat().st_mtime) if zip_path.is_file() else 0
     return {
         "download_url": f"{settings.PUBLIC_BASE_URL}/downloads/extension.zip?t={buster}",
-        "version": __version__,
+        "version": __version__,                       # 服务端版本(历史字段,语义保持不变)
+        "extension_version": _read_extension_version(),  # 插件真实版本(排障比对用这个)
         "apikey_hint": _APIKEY_HINT,
         "install_steps": _INSTALL_STEPS,
         "server_time": datetime.utcnow().isoformat(),

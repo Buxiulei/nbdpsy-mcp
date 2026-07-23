@@ -4,6 +4,7 @@
 以及 Alembic autogenerate(env.py 导入本包)据此感知全部表结构。
 """
 
+from app.models.note_deletion import NoteDeletion
 from app.models.note_metric import NoteMetric, NoteMetricDaily
 from app.models.operator import Operator, OperatorAccountAccess
 from app.models.psych_glossary import PsychGlossary
@@ -17,6 +18,7 @@ __all__ = [
     "OperatorAccountAccess",
     "XhsAccount",
     "PublishJob",
+    "NoteDeletion",
     "NoteMetric",
     "NoteMetricDaily",
     "UploadBatch",

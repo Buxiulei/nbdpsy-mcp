@@ -20,6 +20,8 @@ from app.browser.account_locks import account_locks
 from app.browser.browser_gate import browser_slot
 from app.browser.note_delete import NoteDeleteError, delete_notes_by_title
 from app.browser.sync_client import SyncClient
+from app.core.db import get_session
+from app.models.note_deletion import NoteDeletion
 
 _TERMINAL_STATUSES = ("done", "error")
 _ENTRY_TTL = timedelta(hours=1)
@@ -84,28 +86,97 @@ def _delete_sync(account_id: int, cookies: list[dict], title: str, count: int) -
 async def _run_delete(
     deletion_id: str, account_id: int, cookies: list[dict], title: str, count: int
 ) -> None:
-    """后台删除:持号锁串行 → 线程内跑浏览器删除 → 更新台账;异常落 error 不上抛。"""
+    """后台删除:落 running DB 行 → 持号锁串行 → 浏览器删除 → 终态双写;异常落 error 不上抛。
+
+    DB 台账(skills 侧反馈 2026-07-23):删除不可逆,内存台账重启即丢会让"删了没删"
+    永久不可查。running 行在此起步时写入;server 若在删除中途重启,该行永远停在
+    running —— 由读方(get_delete_persisted)译成 unknown 语义,不误报也不丢历史。
+    """
+    try:
+        await _db_insert_running(deletion_id, account_id, title)
+    except Exception as exc:  # DB 台账写失败不拦删除主流程(内存台账仍在)
+        logger.warning(f"删除台账 DB 写入失败(不拦主流程) deletion_id={deletion_id}: {exc}")
     try:
         async with account_locks.get(account_id):
             async with browser_slot():
                 result = await asyncio.to_thread(
                     _delete_sync, account_id, cookies, title, count
                 )
-        _update_entry(deletion_id, "done",
-                      deleted=result["deleted"], remaining=result["remaining"],
-                      reason=None)
+        await _finalize(deletion_id, "done",
+                        deleted=result["deleted"], remaining=result["remaining"],
+                        reason=None)
     except NoteDeleteError as exc:
         logger.warning(
             f"笔记删除失败 deletion_id={deletion_id} account_id={account_id} "
             f"title={title!r} reason={exc.reason}"
         )
-        _update_entry(deletion_id, "error", deleted=0, remaining=None, reason=exc.reason)
+        await _finalize(deletion_id, "error", deleted=0, remaining=None,
+                        reason=exc.reason)
     except Exception as exc:  # 兜底:任务异常也要落终态,别让台账永远 running
         logger.exception(
             f"笔记删除任务异常 deletion_id={deletion_id} account_id={account_id}"
         )
-        _update_entry(deletion_id, "error", deleted=0, remaining=None,
-                      reason=f"删除任务异常:{exc}")
+        await _finalize(deletion_id, "error", deleted=0, remaining=None,
+                        reason=f"删除任务异常:{exc}")
+
+
+async def _db_insert_running(deletion_id: str, account_id: int, title: str) -> None:
+    """向 DB 台账落一条 running 行(后台任务起步时)。"""
+    async with get_session() as session:
+        session.add(NoteDeletion(
+            id=deletion_id, account_id=account_id, title=title,
+            status="running", deleted=0,
+        ))
+        await session.commit()
+
+
+async def _finalize(
+    deletion_id: str, status: str, deleted: int, remaining: int | None,
+    reason: str | None,
+) -> None:
+    """终态双写:内存台账 + DB 台账(DB 失败只告警,内存结果仍可轮询到)。"""
+    _update_entry(deletion_id, status, deleted=deleted, remaining=remaining,
+                  reason=reason)
+    try:
+        async with get_session() as session:
+            row = await session.get(NoteDeletion, deletion_id)
+            if row is not None:
+                row.status = status
+                row.deleted = deleted
+                row.remaining = remaining
+                row.reason = reason
+                await session.commit()
+    except Exception as exc:
+        logger.warning(f"删除台账 DB 终态更新失败 deletion_id={deletion_id}: {exc}")
+
+
+async def get_delete_persisted(deletion_id: str) -> dict | None:
+    """内存台账 miss 后的 DB 回退读(REST 层用)。
+
+    - 终态行(done/error)原样返回 —— 重启后"删了没删"仍可查(盲区闭合);
+    - running 行且内存无此条 = 任务被重启打断,结果**未知**:译成
+      status="unknown" + reason 说明,绝不冒充 running(它永远不会完成)。
+    """
+    async with get_session() as session:
+        row = await session.get(NoteDeletion, deletion_id)
+    if row is None:
+        return None
+    entry = {
+        "status": row.status,
+        "account_id": row.account_id,
+        "title": row.title,
+        "deleted": row.deleted,
+        "remaining": row.remaining,
+        "reason": row.reason,
+    }
+    if row.status == "running":
+        # 内存台账没有而 DB 停在 running:server 重启打断,结果未知
+        entry["status"] = "unknown"
+        entry["reason"] = (
+            "server 重启中断了删除任务,是否已删结果未知:请到创作中心笔记管理页"
+            "人工核对该标题笔记数量后再决定是否重新发起"
+        )
+    return entry
 
 
 def _update_entry(
