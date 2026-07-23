@@ -318,6 +318,11 @@ async def revise_video_job(job_id: int, req: ReviseJobRequest) -> dict:
         except remake_revision.EditPlanError as exc:
             # exc.detail = LLM 原始说明 / 具体违规描述（源同义，ValueError→400 带明细）
             raise ValueError(exc.detail)
+        # scene_edit 溯源（第三轮扩展）：把场景 id 就地解析成 facts 源时间窗 baked 进 edit_plan，
+        # 绕开子 job storyboard 重建的场景 id 漂移。父 storyboard 已加载、facts 从父 raw 读，
+        # 解析结果随不可变 edit_plan 落库/进 meta（子 rewrite apply 时直接消费，I1 幂等）。
+        facts = _load_raw_json(job.id, "scene_facts.json")
+        remake_revision.resolve_scene_edit_spans(edit_plan, storyboard, facts)
         child = await scheduler.create_revision_job(
             session, job, instructions=req.instructions, edit_plan=edit_plan)
         inherit_artifacts(job.id, child.id)

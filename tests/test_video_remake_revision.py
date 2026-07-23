@@ -94,6 +94,20 @@ class TestParseInstructions:
         assert ops == arr
 
     @pytest.mark.asyncio
+    async def test_parse_scene_edit(self):
+        # 第三轮扩展：把运动球段转静止
+        arr = [{"type": "scene_edit", "scene_id": 2, "static": True}]
+        ops, _ = await _parse(json.dumps(arr, ensure_ascii=False))
+        assert ops == arr
+
+    @pytest.mark.asyncio
+    async def test_parse_ball_style_color_cycle_periods(self):
+        # 第三轮扩展：每晃一组变色
+        arr = [{"type": "ball_style", "color_cycle_periods": 1}]
+        ops, _ = await _parse(json.dumps(arr, ensure_ascii=False))
+        assert ops == arr
+
+    @pytest.mark.asyncio
     async def test_parse_mixed_multi_op(self):
         arr = [
             {"type": "script_edit", "index": 0, "new_text": "欢迎。"},
@@ -143,9 +157,10 @@ class TestParseInstructions:
         assert "[0]" in prompt and "0.0-3.0s" in prompt and "欢迎来到本次练习" in prompt
         # 场景摘要（id/类型/时间）
         assert "场景 2" in prompt and "ball_exercise" in prompt and "5.0-15.0s" in prompt
-        # 操作 schema（六种 EditOp 类型名齐全）
+        # 操作 schema（八种 EditOp 类型名齐全，含第三轮扩展 scene_edit + color_cycle_periods）
         for t in ("script_edit", "script_delete", "script_insert",
-                  "card_edit", "ball_style", "global_param"):
+                  "card_edit", "ball_style", "global_param",
+                  "scene_edit", "color_cycle_periods"):
             assert t in prompt
 
     # 源 test_parse_uses_realtime_urgent（断言 llm.chat 传 urgent=True）不迁：薄 provider
@@ -234,6 +249,70 @@ class TestValidateEditPlan:
                 [{"type": "ball_style", "color_mode": "rainbow"}], REWRITTEN, STORYBOARD)
         assert "rainbow" in ei.value.detail
 
+    # ---- 第三轮扩展：scene_edit / color_cycle_periods 校验边界 ----
+
+    def test_validate_scene_edit_ok(self):
+        assert revision.validate_edit_plan(
+            [{"type": "scene_edit", "scene_id": 2, "static": True}],
+            REWRITTEN, STORYBOARD) is None
+
+    def test_validate_scene_edit_scene_not_exist(self):
+        with pytest.raises(EditPlanError) as ei:
+            revision.validate_edit_plan(
+                [{"type": "scene_edit", "scene_id": 99, "static": True}],
+                REWRITTEN, STORYBOARD)
+        assert "不存在" in ei.value.detail
+
+    def test_validate_scene_edit_on_non_ball_scene(self):
+        # scene 1 是卡片，scene_edit 不适用 → fail-fast
+        with pytest.raises(EditPlanError) as ei:
+            revision.validate_edit_plan(
+                [{"type": "scene_edit", "scene_id": 1, "static": True}],
+                REWRITTEN, STORYBOARD)
+        assert "球段" in ei.value.detail
+
+    def test_validate_scene_edit_static_must_be_true(self):
+        for bad in (False, None, "true", 1):
+            with pytest.raises(EditPlanError) as ei:
+                revision.validate_edit_plan(
+                    [{"type": "scene_edit", "scene_id": 2, "static": bad}],
+                    REWRITTEN, STORYBOARD)
+            assert "static" in ei.value.detail
+
+    def test_validate_scene_edit_missing_static(self):
+        with pytest.raises(EditPlanError):
+            revision.validate_edit_plan(
+                [{"type": "scene_edit", "scene_id": 2}], REWRITTEN, STORYBOARD)
+
+    def test_validate_scene_edit_unknown_key(self):
+        with pytest.raises(EditPlanError) as ei:
+            revision.validate_edit_plan(
+                [{"type": "scene_edit", "scene_id": 2, "static": True, "wobble": 1}],
+                REWRITTEN, STORYBOARD)
+        assert "wobble" in ei.value.detail
+
+    def test_validate_color_cycle_periods_valid(self):
+        for n in (1, 2, 5):
+            assert revision.validate_edit_plan(
+                [{"type": "ball_style", "color_cycle_periods": n}],
+                REWRITTEN, STORYBOARD) is None
+
+    def test_validate_color_cycle_periods_non_positive(self):
+        for bad in (0, -1):
+            with pytest.raises(EditPlanError) as ei:
+                revision.validate_edit_plan(
+                    [{"type": "ball_style", "color_cycle_periods": bad}],
+                    REWRITTEN, STORYBOARD)
+            assert "正整数" in ei.value.detail
+
+    def test_validate_color_cycle_periods_non_int(self):
+        # 1.5 / True(bool) 都不是正整数
+        for bad in (1.5, True):
+            with pytest.raises(EditPlanError):
+                revision.validate_edit_plan(
+                    [{"type": "ball_style", "color_cycle_periods": bad}],
+                    REWRITTEN, STORYBOARD)
+
     def test_validate_global_param_unknown_key(self):
         with pytest.raises(EditPlanError) as ei:
             revision.validate_edit_plan(
@@ -311,6 +390,33 @@ class TestApplyEdits:
         _, ov = revision.apply_edits(ops, REWRITTEN, param_overrides={})
         assert ov["ball"] == {"y_ratio": 0.5, "period_s": 2.2}
 
+    def test_apply_scene_edit_writes_static_source_spans(self):
+        # 端点 resolve 已 baked static_source_spans；apply 累积进 ball.static_source_spans
+        ops = [{"type": "scene_edit", "scene_id": 2, "static": True,
+                "static_source_spans": [[10.0, 20.0]]}]
+        _, ov = revision.apply_edits(ops, REWRITTEN, param_overrides={})
+        assert ov["ball"]["static_source_spans"] == [[10.0, 20.0]]
+
+    def test_apply_multi_scene_edit_accumulates(self):
+        # 多条 scene_edit 各贡献一窗，同一 overrides 上追加不覆盖
+        ops = [{"type": "scene_edit", "scene_id": 2, "static": True,
+                "static_source_spans": [[10.0, 20.0]]},
+               {"type": "scene_edit", "scene_id": 3, "static": True,
+                "static_source_spans": [[30.0, 40.0]]}]
+        _, ov = revision.apply_edits(ops, REWRITTEN, param_overrides={})
+        assert ov["ball"]["static_source_spans"] == [[10.0, 20.0], [30.0, 40.0]]
+
+    def test_apply_scene_edit_without_baked_spans_is_noop(self):
+        # 未 baked（理论上端点必 baked，防御）→ 不写 static_source_spans
+        ops = [{"type": "scene_edit", "scene_id": 2, "static": True}]
+        _, ov = revision.apply_edits(ops, REWRITTEN, param_overrides={})
+        assert "static_source_spans" not in ov["ball"]
+
+    def test_apply_ball_style_color_cycle_periods_writes_override(self):
+        ops = [{"type": "ball_style", "color_cycle_periods": 1}]
+        _, ov = revision.apply_edits(ops, REWRITTEN, param_overrides={})
+        assert ov["ball"] == {"color_cycle_periods": 1}
+
     def test_apply_global_param_writes_overrides(self):
         ops = [{"type": "global_param", "closing_line": "好，练习结束。"}]
         _, ov = revision.apply_edits(ops, REWRITTEN, param_overrides={})
@@ -380,3 +486,79 @@ class TestApplyEdits:
         assert segs[0]["zh"] == "欢迎你。"
         assert ov["cards"]["1"] == {"title": "开始前"}
         assert ov["ball"] == {"y_ratio": 0.5}
+
+
+# ---------------- 第三轮扩展：resolve_scene_edit_spans（scene_id → facts 源时间窗溯源） ----------------
+
+class TestResolveSceneEditSpans:
+    """把 scene_edit 的场景 id 溯源成 facts 源时间窗，抗子 job storyboard 场景 id 漂移。
+
+    映射走卡片锚点 offset：弹性时间轴里卡片块被重排（改时长）、球块保时长，故连续球区内
+    source = retimed - offset，offset 由该球区之前最近卡片边界确定。
+    """
+
+    def _elastic_case(self):
+        # 卡片源 [0,10] 被重排拉长到 [0,25]（offset=15），随后运动球段源 [10,20] → 分镜 [25,35]
+        facts = {"scenes": [
+            {"t0": 0.0, "t1": 10.0, "kind": "title_card", "text": "intro"},
+            {"t0": 10.0, "t1": 20.0, "kind": "ball_exercise",
+             "ball_color_hex": "#FFFFFF", "period_s": 1.5},
+        ]}
+        storyboard = {"scenes": [
+            {"id": 1, "t0": 0.0, "t1": 25.0, "type": "title_card",
+             "renderer": "still_image", "content": {"title": "引言"}},
+            {"id": 2, "t0": 25.0, "t1": 35.0, "type": "ball_exercise",
+             "renderer": "programmatic",
+             "params": {"ball_color": "#7A1F2B", "period_s": 1.5, "static": False}},
+        ]}
+        return facts, storyboard
+
+    def test_resolve_maps_retimed_scene_to_source_span_via_card_offset(self):
+        facts, storyboard = self._elastic_case()
+        ops = [{"type": "scene_edit", "scene_id": 2, "static": True}]
+        revision.resolve_scene_edit_spans(ops, storyboard, facts)
+        # 分镜球段 [25,35] 减去球区 offset=15 → 源窗 [10,20]（= facts 运动球段源区间）
+        assert ops[0]["static_source_spans"] == [[10.0, 20.0]]
+
+    def test_resolve_identity_when_no_facts(self):
+        # facts 缺失（理论上不发生）→ 退化恒等（retimed==source），非弹性父片精确
+        _, storyboard = self._elastic_case()
+        ops = [{"type": "scene_edit", "scene_id": 2, "static": True}]
+        revision.resolve_scene_edit_spans(ops, storyboard, None)
+        assert ops[0]["static_source_spans"] == [[25.0, 35.0]]
+
+    def test_resolve_leaves_non_scene_edit_ops_untouched(self):
+        facts, storyboard = self._elastic_case()
+        ops = [{"type": "ball_style", "y_ratio": 0.5},
+               {"type": "scene_edit", "scene_id": 2, "static": True}]
+        revision.resolve_scene_edit_spans(ops, storyboard, facts)
+        assert "static_source_spans" not in ops[0]           # ball_style 不动
+        assert ops[1]["static_source_spans"] == [[10.0, 20.0]]
+
+    def test_resolve_multi_scene_edit_each_gets_span(self):
+        # 两卡片区各夹一球段，各自按所在球区 offset 溯源
+        facts = {"scenes": [
+            {"t0": 0.0, "t1": 10.0, "kind": "title_card", "text": "a"},
+            {"t0": 10.0, "t1": 20.0, "kind": "ball_exercise",
+             "ball_color_hex": "#FFFFFF", "period_s": 1.5},
+            {"t0": 20.0, "t1": 24.0, "kind": "text_card", "text": "b"},
+            {"t0": 24.0, "t1": 34.0, "kind": "ball_exercise",
+             "ball_color_hex": "#A2C40C", "period_s": 1.5},
+        ]}
+        storyboard = {"scenes": [
+            {"id": 1, "t0": 0.0, "t1": 25.0, "renderer": "still_image",
+             "type": "title_card", "content": {}},                       # offset 15
+            {"id": 2, "t0": 25.0, "t1": 35.0, "type": "ball_exercise",
+             "renderer": "programmatic",
+             "params": {"period_s": 1.5, "static": False}},
+            {"id": 3, "t0": 35.0, "t1": 41.0, "renderer": "still_image",
+             "type": "text_card", "content": {}},                        # 源 [20,24] → offset 17
+            {"id": 4, "t0": 41.0, "t1": 51.0, "type": "ball_exercise",
+             "renderer": "programmatic",
+             "params": {"period_s": 1.5, "static": False}},
+        ]}
+        ops = [{"type": "scene_edit", "scene_id": 2, "static": True},
+               {"type": "scene_edit", "scene_id": 4, "static": True}]
+        revision.resolve_scene_edit_spans(ops, storyboard, facts)
+        assert ops[0]["static_source_spans"] == [[10.0, 20.0]]           # 41-17=24, 51-17=34
+        assert ops[1]["static_source_spans"] == [[24.0, 34.0]]

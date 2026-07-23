@@ -715,6 +715,149 @@ class TestRevisionOverrides:
         balls = [s for s in sb["scenes"] if s["type"] == "ball_exercise"]
         assert balls and all("y_ratio" not in s["params"] for s in balls)
 
+    # ---- 第三轮扩展：static_source_spans（scene_edit 转静止）/ color_cycle_periods（每晃一组变色） ----
+
+    async def test_static_source_spans_turns_moving_run_static_vs_baseline(self):
+        # scene_edit 溯源窗命中的运动球段 → 强制转静止（米白 + static + 无 cue）；与基线对照
+        facts = {"scenes": [
+            {"t0": 0.0, "t1": 6.0, "kind": "title_card", "text": "intro"},
+            {"t0": 6.0, "t1": 16.0, "kind": "ball_exercise",       # facts 运动段①
+             "ball_color_hex": "#FFFFFF", "period_s": 1.5, "period_estimated": True},
+            {"t0": 16.0, "t1": 26.0, "kind": "ball_exercise",      # facts 运动段②（将被强制静止）
+             "ball_color_hex": "#A2C40C", "period_s": 1.5, "period_estimated": True},
+        ], "warnings": []}
+        segs = [{"start": 1.0, "end": 3.0, "en": "a", "zh": "引言"}]  # 只落 card，运动段不 carve
+
+        def _statics(sb):
+            return [s for s in sb["scenes"]
+                    if s["type"] == "ball_exercise" and s["params"].get("static")]
+
+        # 基线：两段都运动，无任何静止球
+        with patch.object(storyboard, "_chat_localize", AsyncMock(return_value={})):
+            base = await storyboard.build_storyboard(
+                facts, duration=26.0, segments=segs, clip_durations=[2.0])
+        assert _statics(base) == []
+
+        # 强制 facts 段②（源 [16,26]）静止
+        with patch.object(storyboard, "_chat_localize", AsyncMock(return_value={})):
+            forced = await storyboard.build_storyboard(
+                facts, duration=26.0, segments=segs, clip_durations=[2.0],
+                static_source_spans=[[16.0, 26.0]])
+        fstatic = _statics(forced)
+        fmotion = [s for s in forced["scenes"]
+                   if s["type"] == "ball_exercise" and not s["params"].get("static")]
+        assert len(fstatic) == 1 and fmotion                     # 段①仍运动、段②转静止
+        # 与既有静止段语义一字不差：米白居中 + static=True + 带周期（渲染忽略）
+        st = fstatic[0]
+        assert st["params"]["ball_color"] == style.CREAM
+        assert st["params"]["static"] is True
+        assert st["params"]["period_s"] > 0
+        # 段②是末段 ball → 强制静止落在片尾
+        assert forced["scenes"][-1]["params"].get("static") is True
+        # 无提示音：tones 过滤谓词（period_s and not static）把它排除
+        assert not ((st["params"].get("period_s")) and not st["params"].get("static"))
+        # 栅格吸附终校照走 + schema 校验全过（含 F-B 栅格不变量）
+        storyboard.validate_storyboard(forced)
+
+    async def test_static_source_spans_middle_run_splits_with_snapped_boundaries(self):
+        # 强制运动 run 中段某 facts 场景静止 → 运动 run 被劈成 [运动|静止|运动]，边界吸附栅格
+        facts = {"scenes": [
+            {"t0": 0.0, "t1": 6.0, "kind": "title_card", "text": "intro"},
+            {"t0": 6.0, "t1": 16.0, "kind": "ball_exercise",
+             "ball_color_hex": "#FFFFFF", "period_s": 1.5, "period_estimated": True},
+            {"t0": 16.0, "t1": 26.0, "kind": "ball_exercise",     # 中段：被强制静止
+             "ball_color_hex": "#A2C40C", "period_s": 1.5, "period_estimated": True},
+            {"t0": 26.0, "t1": 36.0, "kind": "ball_exercise",
+             "ball_color_hex": "#E8194B", "period_s": 1.5, "period_estimated": True},
+        ], "warnings": []}
+        segs = [{"start": 1.0, "end": 3.0, "en": "a", "zh": "引言"}]
+        with patch.object(storyboard, "_chat_localize", AsyncMock(return_value={})):
+            sb = await storyboard.build_storyboard(
+                facts, duration=36.0, segments=segs, clip_durations=[2.0], period_s=1.5,
+                static_source_spans=[[16.0, 26.0]])
+        balls = [s for s in sb["scenes"] if s["type"] == "ball_exercise"]
+        # 中段静止把运动 run 一分为二：至少 2 个运动 + 1 个静止
+        assert sum(1 for b in balls if b["params"].get("static")) == 1
+        assert sum(1 for b in balls if not b["params"].get("static")) >= 2
+        # motion↔static 边界吸附「球过中点」栅格（T/2=0.75）
+        h = 1.5 / 2
+
+        def _is_m(s):
+            return s["type"] == "ball_exercise" and not s["params"].get("static")
+
+        def _is_s(s):
+            return s["type"] == "ball_exercise" and s["params"].get("static")
+
+        checked = 0
+        for a, b in zip(sb["scenes"], sb["scenes"][1:]):
+            if (_is_m(a) and _is_s(b)) or (_is_s(a) and _is_m(b)):
+                drift = abs(a["t1"] - round(a["t1"] / h) * h)
+                assert drift <= 1.0 / style.FPS + 1e-6
+                checked += 1
+        assert checked == 2                                      # 进/出静止两条边界
+        storyboard.validate_storyboard(sb)
+
+    async def test_color_cycle_periods_splits_long_run_into_per_period_colors(self):
+        # 用户「每晃一组变色」= N=1：长运动段按每周期切子场景逐段轮色，过 validate
+        facts = {"scenes": [
+            {"t0": 0.0, "t1": 6.0, "kind": "title_card", "text": "intro"},
+            {"t0": 6.0, "t1": 36.0, "kind": "ball_exercise",      # 单个 30s 长运动段（恒色病灶）
+             "ball_color_hex": "#FFFFFF", "period_s": 1.5, "period_estimated": True},
+        ], "warnings": []}
+        segs = [{"start": 1.0, "end": 3.0, "en": "a", "zh": "引言"}]  # 只落 card，运动段不 carve
+        with patch.object(storyboard, "_chat_localize", AsyncMock(return_value={})):
+            sb = await storyboard.build_storyboard(
+                facts, duration=36.0, segments=segs, clip_durations=[2.0],
+                period_s=1.5, color_cycle_periods=1)
+        motion = [s for s in sb["scenes"]
+                  if s["type"] == "ball_exercise" and not s["params"].get("static")]
+        # 30s 运动段按每 1.5s(=1 周期) 切 → 远多于逐相位的 1 段
+        assert len(motion) >= 15
+        # 逐段沿调色板顺序轮色：前 5 段 = [勃艮第红, 淡金, 米白, 深金, 勃艮第红]
+        assert [m["params"]["ball_color"] for m in motion[:5]] == [
+            style.BURGUNDY, style.GOLD, style.CREAM, style.DARK_GOLD, style.BURGUNDY]
+        # 相邻子段颜色必不同（每晃一组都变色）
+        for a, b in zip(motion, motion[1:]):
+            assert a["params"]["ball_color"] != b["params"]["ball_color"]
+        # 每段时长 ≈ 1 个周期（1.5s，末尾余段除外）
+        for m in motion[:-1]:
+            assert m["t1"] - m["t0"] == pytest.approx(1.5, abs=1e-6)
+        # 铺满/衔接不破 + schema 校验全过（切点 motion↔motion，全局相位保球位连续）
+        for a, b in zip(sb["scenes"], sb["scenes"][1:]):
+            assert a["t1"] == pytest.approx(b["t0"], abs=1e-9)
+        storyboard.validate_storyboard(sb)
+
+    async def test_color_cycle_periods_n2_doubles_chunk_length(self):
+        # N=2：每两个周期换色（变色慢一点）→ 段时长 ≈ 2 周期
+        facts = {"scenes": [
+            {"t0": 0.0, "t1": 6.0, "kind": "title_card", "text": "intro"},
+            {"t0": 6.0, "t1": 36.0, "kind": "ball_exercise",
+             "ball_color_hex": "#FFFFFF", "period_s": 1.5, "period_estimated": True},
+        ], "warnings": []}
+        segs = [{"start": 1.0, "end": 3.0, "en": "a", "zh": "引言"}]
+        with patch.object(storyboard, "_chat_localize", AsyncMock(return_value={})):
+            sb = await storyboard.build_storyboard(
+                facts, duration=36.0, segments=segs, clip_durations=[2.0],
+                period_s=1.5, color_cycle_periods=2)
+        motion = [s for s in sb["scenes"]
+                  if s["type"] == "ball_exercise" and not s["params"].get("static")]
+        for m in motion[:-1]:
+            assert m["t1"] - m["t0"] == pytest.approx(3.0, abs=1e-6)   # 2 × 1.5
+        storyboard.validate_storyboard(sb)
+
+    async def test_new_overrides_absent_output_identical_to_baseline(self):
+        # 保真红线：不带 color_cycle_periods / static_source_spans（None/空）时输出与基线逐字节一致
+        facts = self._motion_facts()
+        segs = [{"start": 1.0, "end": 3.0, "en": "a", "zh": "引言"}]
+        with patch.object(storyboard, "_chat_localize", AsyncMock(return_value={})):
+            base = await storyboard.build_storyboard(
+                facts, duration=26.0, segments=segs, clip_durations=[2.0])
+        with patch.object(storyboard, "_chat_localize", AsyncMock(return_value={})):
+            same = await storyboard.build_storyboard(
+                facts, duration=26.0, segments=segs, clip_durations=[2.0],
+                color_cycle_periods=None, static_source_spans=[])
+        assert base == same
+
     @pytest.mark.asyncio
     async def test_sentence_gap_threads_into_relayout(self):
         captured = {}

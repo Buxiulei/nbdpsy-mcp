@@ -5,6 +5,7 @@ storyboard.json 是管线核心中间产物，落盘可查可手改。
 """
 import json
 import logging
+import math
 import statistics
 
 from app.video.pipeline.remake import style, timeline
@@ -40,6 +41,42 @@ def _quantize_t(t: float) -> float:
     相邻段量化后仍相等（衔接不断），从源头消除漂移。
     """
     return round(float(t) * style.FPS) / style.FPS
+
+
+def _scene_hits_span(sc: dict, spans: list) -> bool:
+    """facts 球场景源区间 [t0,t1] 是否与任一强制静止源窗相交（revision scene_edit，第三轮扩展）。
+
+    spans 为端点溯源出的 facts 源时间窗列表 [[s0,s1],...]（见 revision.resolve_scene_edit_spans）；
+    命中的运动球段在 build_storyboard 里按静止处理。spans 空 → 恒 False（保真：无 override 时行为不变）。
+    """
+    if not spans:
+        return False
+    st0, st1 = float(sc.get("t0", 0.0)), float(sc.get("t1", 0.0))
+    return any(min(st1, float(b)) - max(st0, float(a)) > 1e-6 for a, b in spans)
+
+
+def _split_motion_by_periods(m0: float, m1: float, *, run_ref: float,
+                             span: float) -> list[tuple[float, float]]:
+    """把运动子段 [m0,m1] 按 run 起点起算的 span(=N·T) 栅格切成连续子段（含末尾余段），供轮色。
+
+    切点 = run_ref + k*span 落 (m0,m1) 内者，量化到 1/FPS 帧栅格；相邻子段共用同一量化边界值
+    （铺满/衔接不破）。span<=0 或无内部切点 → 原样返回单段。切点均 motion↔motion——全局相位公式
+    sin(2π(t+t0)/T) 保证球位在切点连续（渲染层零改动），且不触发 F-B 栅格不变量（只管 motion↔static）。
+    整周期倍数（N·T）切分令切点恰在球回到同一相位处，视觉上「每晃一组换色」自然。
+    """
+    if span <= 0:
+        return [(m0, m1)]
+    pts: list[float] = []
+    k = math.ceil((m0 - run_ref) / span - 1e-9)
+    while True:
+        p = _quantize_t(run_ref + k * span)
+        if p >= m1 - 1e-9:
+            break
+        if p > m0 + 1e-9:
+            pts.append(p)
+        k += 1
+    bounds = [m0] + pts + [m1]
+    return [(bounds[idx], bounds[idx + 1]) for idx in range(len(bounds) - 1)]
 
 
 def validate_storyboard(sb: dict) -> None:
@@ -254,6 +291,59 @@ def _snap_ball_boundaries(scenes: list[dict], *, period: float, fps: int) -> Non
             break
 
 
+def _emit_cycle_motion_run(scenes: list, src_scenes: list, i: int, j: int,
+                           intervals: dict, speech_windows: list, *,
+                           base_params: dict, ball_palette: list, global_period: float,
+                           span: float, phase_idx: int, is_static_facts) -> int:
+    """color_cycle_periods 运动 run：按 A2 语音窗 carve + N·T 切分出段序列，逐 motion 段轮色。
+
+    两遍法（第二遍才知每 motion 段的静止邻居，顺延跳槽判定才干净）：
+      1) 逐相位过 carve_motion_for_speech（复用 A2 静止子段 + F3 栅格吸附）；motion 子段再按 run
+         起点起算的 N·T 栅格切 chunk（_split_motion_by_periods），静止子段原样入列。
+      2) 逐 motion chunk 沿调色板顺序取色（phase_idx 跨全片连续）；轮到米白且紧邻静止（内部 carve
+         静止 / run 端邻组间静止或 scene_edit 强制静止段）→ 跳槽取下一色（复用顺延跳槽语义）。
+    渲染层零改动：chunk 边界 motion↔motion，全局相位保证球位连续；F-B 栅格不变量只管 motion↔static，
+    chunk 内边界豁免，run 与静止的外边界仍由 _snap_ball_boundaries 终校吸附。返回推进后的 phase_idx。
+    """
+    run_ref = intervals[i][0]
+    run_segs: list[dict] = []
+    for k in range(i, j):
+        ph_t0, ph_t1 = intervals[k]
+        for kind, st0, st1 in timeline.carve_motion_for_speech(
+                ph_t0, ph_t1, speech_windows, fps=style.FPS, period=global_period):
+            if kind == "static":
+                run_segs.append({"t0": st0, "t1": st1, "type": "ball_exercise",
+                                 "renderer": "programmatic",
+                                 "params": dict(base_params, ball_color=style.CREAM,
+                                                static=True)})
+            else:
+                for c0, c1 in _split_motion_by_periods(st0, st1, run_ref=run_ref, span=span):
+                    run_segs.append({"t0": c0, "t1": c1, "type": "ball_exercise",
+                                     "renderer": "programmatic",
+                                     "params": dict(base_params)})       # 色第二遍填
+    # run 两端是否紧邻静止（组间休息 run / scene_edit 强制静止段）——顺延跳槽判定用
+    prev_static = (i > 0 and src_scenes[i - 1].get("kind") == "ball_exercise"
+                   and is_static_facts(src_scenes[i - 1]))
+    next_static = (j < len(src_scenes) and src_scenes[j].get("kind") == "ball_exercise"
+                   and is_static_facts(src_scenes[j]))
+    m = len(run_segs)
+    for pos, seg in enumerate(run_segs):
+        if seg["params"].get("static"):
+            continue
+        touch = ((pos > 0 and run_segs[pos - 1]["params"].get("static"))
+                 or (pos == 0 and prev_static)
+                 or (pos < m - 1 and run_segs[pos + 1]["params"].get("static"))
+                 or (pos == m - 1 and next_static))
+        color = ball_palette[phase_idx % len(ball_palette)]
+        if color == style.CREAM and touch:      # 米白紧邻静止 → 跳槽（避免运动米白球看着像静止）
+            phase_idx += 1
+            color = ball_palette[phase_idx % len(ball_palette)]
+        phase_idx += 1
+        seg["params"]["ball_color"] = color
+    scenes.extend(run_segs)
+    return phase_idx
+
+
 async def build_storyboard(facts: dict, *, duration: float,
                            segments: list[dict] | None = None,
                            clip_durations: list[float] | None = None,
@@ -261,6 +351,8 @@ async def build_storyboard(facts: dict, *, duration: float,
                            palette: list[str] | None = None,
                            period_s: float | None = None,
                            color_mode: str | None = None,
+                           color_cycle_periods: int | None = None,
+                           static_source_spans: list | None = None,
                            sentence_gap: float | None = None) -> dict:
     """原片事实 → nbdpsy_v1 分镜脚本。
 
@@ -268,6 +360,12 @@ async def build_storyboard(facts: dict, *, duration: float,
     y_ratio 球心竖直位置（写入球段 params 供渲染器读）；palette 覆盖 BALL_PALETTE 循环色；
     period_s 覆盖全片统一摆动周期；color_mode="single" 时运动球全程单色（取 palette[0]），
     默认/"cycle" 按相位轮播；sentence_gap 覆盖 relayout 的 card 块句间停顿。
+
+    第三轮验收扩展（None/空时行为逐字节不变，用现有生成测试保证）：
+    color_cycle_periods=N 把连续运动球段按每 N 个摆动周期（N·T）切成子场景逐段轮色（复用相位轮转
+    + 顺延跳槽语义，用户「每晃一组变色」= N=1）——切点 motion↔motion、全局相位保证球位连续、渲染零改动；
+    static_source_spans=[[s0,s1],...] 把源区间命中的运动球段强制转静止（米白居中、无提示音、栅格吸附
+    终校照走——与既有静止段语义一字不差），供 scene_edit（把孤立摆动球段停成静止）落地。
 
     球段（wave2 + A4）：连续微段按「运动 run / 静止 run」聚合（run 仅判运动/静止与保时长）。
     运动 run 用全片统一中位周期，颜色恢复 per 相位粒度——每相位按相位序循环取 BALL_PALETTE
@@ -312,6 +410,13 @@ async def build_storyboard(facts: dict, *, duration: float,
                        for s in retimed
                        if s.get("start") is not None and not s.get("no_dub")]
                       if retimed else [])
+    # scene_edit 强制静止源窗（第三轮扩展）：命中的运动球段按静止处理——run 聚合/渲染/无 cue/栅格
+    # 吸附全走既有静止段路径。static_spans 空 → _is_static_facts 恒等于 bool(sc.static)，逐字节保真。
+    static_spans = list(static_source_spans or [])
+
+    def _is_static_facts(sc: dict) -> bool:
+        return bool(sc.get("static")) or _scene_hits_span(sc, static_spans)
+
     scenes: list[dict] = []
     phase_idx = 0                               # 运动相位序（A4：跨全片连续，静止相位不占序）
     i, n = 0, len(src_scenes)
@@ -324,10 +429,11 @@ async def build_storyboard(facts: dict, *, duration: float,
             continue
         # 聚合连续同类（运动/静止）球微段为一个 run——run 仅用于运动/静止判定与时长保真；
         # 运动 run 的颜色恢复 per 相位粒度（A4），静止 run 整段一个米白休息球。
-        is_static = bool(sc.get("static"))
+        # scene_edit 命中的运动球段视同静止（_is_static_facts），故与相邻静止段聚合为一个米白休息球。
+        is_static = _is_static_facts(sc)
         j = i
         while (j < n and src_scenes[j].get("kind") == "ball_exercise"
-               and bool(src_scenes[j].get("static")) == is_static):
+               and _is_static_facts(src_scenes[j]) == is_static):
             j += 1
         base_params = {"bg_color": style.DARK_BG, "period_s": global_period,
                        "amplitude_ratio": style.BALL_AMPLITUDE_RATIO,
@@ -340,6 +446,12 @@ async def build_storyboard(facts: dict, *, duration: float,
                            "renderer": "programmatic",
                            "params": dict(base_params, ball_color=style.CREAM,
                                           static=True)})
+        elif color_cycle_periods:               # revision：逐 N·T 段轮色（第三轮扩展，取代逐相位色）
+            phase_idx = _emit_cycle_motion_run(
+                scenes, src_scenes, i, j, intervals, speech_windows,
+                base_params=base_params, ball_palette=ball_palette,
+                global_period=global_period, span=float(color_cycle_periods) * global_period,
+                phase_idx=phase_idx, is_static_facts=_is_static_facts)
         else:                                   # 运动 run：逐相位铺循环色（A4），各相位再过 A2 语音窗切分
             for k in range(i, j):
                 if color_mode == "single":      # revision：全程单色取调色板首色，不轮播

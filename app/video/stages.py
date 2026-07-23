@@ -325,6 +325,8 @@ async def _handle_storyboard(job, session, ctx):
         segments=segments, clip_durations=clip_durations,
         y_ratio=ball.get("y_ratio"), palette=ball.get("palette"),
         period_s=ball.get("period_s"), color_mode=ball.get("color_mode"),
+        color_cycle_periods=ball.get("color_cycle_periods"),
+        static_source_spans=ball.get("static_source_spans"),
         sentence_gap=glob.get("sentence_gap"))
     _apply_card_overrides(sb, ov["cards"])      # card_edit：覆盖对应卡片场景 content
     # 校验须在 pop 前跑：F-B 栅格不变量靠 retimed_segments 键判弹性模式（见 validate_storyboard），
