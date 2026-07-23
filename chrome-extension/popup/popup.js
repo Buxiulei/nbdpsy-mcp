@@ -381,9 +381,11 @@ function bindEvents() {
     elements.btnRemoteLogin.addEventListener('click', remoteLogin);
     elements.btnSaveConfig.addEventListener('click', saveConfig);
     elements.btnRefreshAccounts.addEventListener('click', loadAccounts);
+    // 使用帮助 → 插件自带的真·使用指南页(旧版误链 /healthz 是 API 健康检查 JSON,
+    // 对运营毫无帮助;指南随插件打包,离线可用、不依赖服务端)。
     document.getElementById('btn-help').addEventListener('click', (e) => {
         e.preventDefault();
-        chrome.tabs.create({ url: `${serverUrl.replace(/\/+$/, '')}/healthz` });
+        chrome.tabs.create({ url: chrome.runtime.getURL('popup/help.html') });
     });
 }
 

@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NBDpsy 助手 · 使用指南</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    background: #F7F3EB;
+    color: #3c3430;
+    line-height: 1.75;
+    padding: 40px 20px 64px;
+  }
+  .page { max-width: 640px; margin: 0 auto; }
+  .hero {
+    background: linear-gradient(135deg, #8A2136 0%, #721B2A 100%);
+    color: #fff;
+    border-radius: 20px;
+    padding: 32px 28px;
+    margin-bottom: 28px;
+  }
+  .hero h1 { font-size: 24px; font-weight: 700; margin-bottom: 6px; }
+  /* 显式白色:下方通用 p{color:#55493f} 优先级同级但声明在后,会盖掉 .hero 的继承白 */
+  .hero p { font-size: 14px; color: rgba(255, 255, 255, 0.88); }
+  .kicker { font-size: 12px; letter-spacing: 2px; color: #C4A060; text-transform: uppercase; }
+  section {
+    background: #fff;
+    border-radius: 16px;
+    padding: 24px 26px;
+    margin-bottom: 16px;
+    box-shadow: 0 2px 12px rgba(114, 27, 42, 0.06);
+  }
+  h2 {
+    font-size: 17px; font-weight: 700; color: #721B2A;
+    margin-bottom: 12px; display: flex; align-items: center; gap: 8px;
+  }
+  .step-num {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 24px; height: 24px; border-radius: 8px; flex-shrink: 0;
+    background: #F3E7D3; color: #8A2136; font-size: 13px; font-weight: 700;
+  }
+  p, li { font-size: 14px; color: #55493f; }
+  ol, ul { padding-left: 22px; margin-top: 6px; }
+  li { margin-bottom: 6px; }
+  li::marker { color: #C4A060; font-weight: 600; }
+  .tip {
+    background: #FBF6EC; border-left: 3px solid #C4A060;
+    border-radius: 10px; padding: 10px 14px; margin-top: 12px; font-size: 13px;
+  }
+  code {
+    background: #F3EFE7; border-radius: 6px; padding: 1px 7px;
+    font-size: 13px; color: #8A2136;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  .badge {
+    display: inline-block; border-radius: 999px; padding: 2px 10px;
+    font-size: 12px; font-weight: 600; margin-right: 4px;
+  }
+  .badge.ok  { background: #E5F2E5; color: #2F6B3A; }
+  .badge.bad { background: #F7E3E3; color: #8A2136; }
+  .badge.cap { background: #F8F0DC; color: #7A5B1E; }
+  .faq dt { font-size: 14px; font-weight: 700; color: #3c3430; margin-top: 14px; }
+  .faq dt::before { content: "Q  "; color: #C4A060; font-weight: 700; }
+  .faq dd { font-size: 14px; color: #55493f; margin-left: 0; margin-top: 2px; }
+  footer { text-align: center; font-size: 12px; color: #a89e92; margin-top: 28px; }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="hero">
+    <div class="kicker">NBDpsy 助手</div>
+    <h1>使用指南</h1>
+    <p>把这台电脑 Chrome 里登录的小红书账号,安全同步到 NBDpsy 运营后台。</p>
+  </div>
+
+  <section>
+    <h2><span class="step-num">1</span>首次配置(只做一次)</h2>
+    <ol>
+      <li>打开插件弹窗,在「Operator API Key」里粘贴接入包里发给你的那串 apikey,点<strong>保存</strong>。</li>
+      <li>保存后底部出现「服务连接正常」即配置完成。</li>
+      <li>服务器地址一般不用动;需要改时展开「高级设置」。</li>
+    </ol>
+    <div class="tip">apikey 忘了或失效:找管理员重置后重新下发,自己是查不回明文的。</div>
+  </section>
+
+  <section>
+    <h2><span class="step-num">2</span>登录小红书账号(加号 / 换号)</h2>
+    <ol>
+      <li>先到 <code>chrome://extensions</code> → 本插件「详情」→ 勾选<strong>「在无痕模式下启用」</strong>(只需勾一次)。</li>
+      <li>回到插件弹窗,点<strong>「打开隐私窗口登录(加/换号)」</strong>。</li>
+      <li>在弹出的无痕窗口里用手机小红书 App <strong>扫码登录</strong>。</li>
+      <li>登录成功后插件会自动把账号同步到后台,弹窗「我的账号」列表里会出现这个号。</li>
+    </ol>
+    <div class="tip">每个号用独立的无痕窗口登录,互不串号;登录完成即可关掉无痕窗口。</div>
+  </section>
+
+  <section>
+    <h2><span class="step-num">3</span>看懂「我的账号」</h2>
+    <ul>
+      <li><span class="badge ok">有效</span>账号登录态正常,后台可正常发布/拉数据。</li>
+      <li><span class="badge bad">失效</span>登录态过期——重新走一遍第 2 步扫码即可恢复。</li>
+      <li><span class="badge cap">验证码</span>被小红书风控拦下,需要人工打开该号过一次验证。</li>
+      <li>点每个号右侧的<strong>「检测」</strong>可立即验活;点外链图标可直接打开该号主页。</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2><span class="step-num">4</span>常见问题</h2>
+    <dl class="faq">
+      <dt>列表里出现 xhs_account_ 一串数字的怪账号?</dt>
+      <dd>登录同步中断留下的占位号,重新扫码登录同一账号会自动清掉,系统也会定期回收。</dd>
+      <dt>点「打开隐私窗口登录」没反应?</dt>
+      <dd>八成是没勾「在无痕模式下启用」(见第 2 步第 1 条)。</dd>
+      <dt>怎么确认插件是不是最新版?</dt>
+      <dd>看 <code>chrome://extensions</code> 里本插件显示的版本号,与管理员通知的最新版本比对。弹窗右上角也有当前版本。</dd>
+      <dt>发布 / 拉数据在哪里操作?</dt>
+      <dd>不在插件里。插件只负责登录与账号同步;发布、笔记数据、删除笔记都由运营助手(Claude)通过后台完成,直接跟它说人话即可。</dd>
+    </dl>
+  </section>
+
+  <footer>NBDpsy 助手 · 遇到解决不了的问题,把弹窗截图发给管理员</footer>
+</div>
+</body>
+</html>
