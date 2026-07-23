@@ -34,19 +34,20 @@ class NoteDeleteError(Exception):
 # 笔记管理页就绪标志:状态 tab 栏(全部/已发布/审核中/未通过)。
 _MANAGE_READY_SELECTOR = 'text=已发布'
 
-# 定位标题卡片:叶子节点文本精确等于标题(或以标题开头,容忍截断省略号),
-# 向上走到合理尺寸的卡片容器,返回卡片矩形与同题总数。
+# 定位标题卡片:先纯文本匹配(TreeWalker 遍历文本节点,**不触发 layout**),再只对
+# 少量命中做可见性/矩形检查。坑:旧版全页逐元素 offsetParent 检查会强制上千次 reflow,
+# 刚加载完的页面封面图流入不断作废布局缓存,首次定位实测吃 ~10s。
 _FIND_CARD_JS = r"""
 (title) => {
-    const leaves = [...document.querySelectorAll('*')].filter(
-        (e) => e.children.length === 0 && e.offsetParent !== null);
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
     const matches = [];
-    for (const el of leaves) {
-        const t = (el.textContent || '').trim();
+    let tn;
+    while ((tn = walker.nextNode())) {
+        const t = (tn.nodeValue || '').trim();
         if (!t) continue;
         if (t === title || (t.length >= 8 && title.startsWith(t.replace(/\.{3}|…$/, '')))
             || t.startsWith(title)) {
-            matches.push(el);
+            if (tn.parentElement) matches.push(tn.parentElement);
         }
     }
     if (!matches.length) return {found: false, count: 0};
@@ -75,12 +76,23 @@ _FIND_CARD_JS = r"""
 
 # 悬停后在卡片矩形内找垃圾桶图标:优先 class/aria 含 delete/trash/del 的可点元素;
 # 匹配不到退到卡片上部图标带的最右一个(实测垃圾桶在最右)。返回坐标+识别片段。
+# 性能:先 elementFromPoint 锚定卡片容器,只扫容器内几十个元素——旧版全页扫上千个
+# 元素且每个 getBoundingClientRect 强制 reflow,封面图流入期间首次定位实测吃 ~12s。
 _FIND_TRASH_JS = r"""
 (card) => {
+    let scope = null;
+    let node = document.elementFromPoint(card.x + card.w / 2, card.y + card.h / 2);
+    for (let i = 0; i < 10 && node; i++) {
+        const r = node.getBoundingClientRect();
+        if (Math.abs(r.x - card.x) < 12 && Math.abs(r.y - card.y) < 12
+            && Math.abs(r.width - card.w) < 24) { scope = node; break; }
+        node = node.parentElement;
+    }
+    const root = scope || document;  // 锚定失败退回全页扫(慢但正确)
     const inCard = (r) => r.x >= card.x - 8 && r.x + r.width <= card.x + card.w + 8
         && r.y >= card.y - 8 && r.y + r.height <= card.y + card.h + 8;
     const icons = [];
-    for (const el of document.querySelectorAll('svg, button, [role=button], i, span, use')) {
+    for (const el of root.querySelectorAll('svg, button, [role=button], i, span, use')) {
         const r = el.getBoundingClientRect();
         if (r.width < 8 || r.width > 60 || r.height < 8 || r.height > 60) continue;
         if (!inCard(r)) continue;
